@@ -58,6 +58,7 @@ tmp/
 .fleet/
 .codex/
 .agents/
+/template-repository-scaffold/
 .DS_Store
 Thumbs.db
 Desktop.ini
@@ -66,8 +67,6 @@ Desktop.ini
 compose.override.yml
 docker-compose.override.yml
 
-# Generated embedded assets. Keep the placeholders/catalog required to build.
+# Generated embedded web assets.
 internal/webui/dist/*
 !internal/webui/dist/index.html
-templates/library/generated/*
-!templates/library/generated/catalog.json

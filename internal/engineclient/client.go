@@ -18,6 +18,22 @@ type Client struct {
 	http    *http.Client
 }
 
+// APIError preserves a structured failure returned by the isolated engine so
+// callers can present an actionable, sanitized explanation.
+type APIError struct {
+	Status    int
+	Code      string
+	Detail    string
+	Retryable bool
+}
+
+func (e *APIError) Error() string {
+	if e.Detail == "" {
+		return fmt.Sprintf("engine returned HTTP %d", e.Status)
+	}
+	return fmt.Sprintf("engine returned HTTP %d: %s", e.Status, e.Detail)
+}
+
 type HostStatus struct {
 	Connected            bool             `json:"connected"`
 	InstanceID           string           `json:"instance_id"`
@@ -71,6 +87,13 @@ type SystemContainer struct {
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 	ObservedAt       time.Time  `json:"observed_at"`
 	Error            string     `json:"error,omitempty"`
+}
+
+type SystemContainerLogs struct {
+	Component  string    `json:"component"`
+	Stdout     string    `json:"stdout"`
+	Stderr     string    `json:"stderr"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 type Port struct {
@@ -139,13 +162,6 @@ type ServerStats struct {
 	ExitCode         *int       `json:"exit_code,omitempty"`
 	Error            string     `json:"error,omitempty"`
 	ObservedAt       time.Time  `json:"observed_at"`
-}
-
-type ServerLogEvent struct {
-	ServerID   string    `json:"server_id"`
-	Stream     string    `json:"stream"`
-	Message    string    `json:"message"`
-	ObservedAt time.Time `json:"observed_at"`
 }
 
 type FileEntry struct {
@@ -219,6 +235,22 @@ func (c *Client) SystemContainers(ctx context.Context) ([]SystemContainer, error
 	return result.Containers, nil
 }
 
+func (c *Client) SystemContainerLogs(
+	ctx context.Context,
+	component string,
+	tail int,
+) (SystemContainerLogs, error) {
+	var result SystemContainerLogs
+	endpoint := fmt.Sprintf(
+		"/v1/system/containers/%s/logs?tail=%d",
+		url.PathEscape(component), tail,
+	)
+	if err := c.do(ctx, http.MethodGet, endpoint, nil, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func (c *Client) RestartWorker(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/system/containers/worker/restart", struct{}{}, nil)
 }
@@ -233,6 +265,16 @@ func (c *Client) Provision(ctx context.Context, serverID string, input Provision
 		return result, err
 	}
 	return result, nil
+}
+
+func (c *Client) InstallExisting(
+	ctx context.Context,
+	serverID string,
+	input InstallSpec,
+) error {
+	return c.do(
+		ctx, http.MethodPost, "/v1/servers/"+serverID+"/install", input, nil,
+	)
 }
 
 func (c *Client) Reconfigure(ctx context.Context, serverID string, input ReconfigureRequest) (ProvisionResult, error) {
@@ -257,17 +299,6 @@ func (c *Client) Stats(ctx context.Context) ([]ServerStats, error) {
 	return result.Servers, nil
 }
 
-func (c *Client) LogEvents(ctx context.Context, since time.Time) ([]ServerLogEvent, error) {
-	var result struct {
-		Events []ServerLogEvent `json:"events"`
-	}
-	endpoint := "/v1/servers/log-events?since=" + url.QueryEscape(since.UTC().Format(time.RFC3339Nano))
-	if err := c.do(ctx, http.MethodGet, endpoint, nil, &result); err != nil {
-		return nil, err
-	}
-	return result.Events, nil
-}
-
 func (c *Client) OpenConsole(ctx context.Context, serverID string, tail int) (io.ReadCloser, error) {
 	request, err := http.NewRequestWithContext(
 		ctx,
@@ -287,7 +318,7 @@ func (c *Client) OpenConsole(ctx context.Context, serverID string, tail int) (io
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("engine returned %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+		return nil, decodeAPIError(response.StatusCode, message)
 	}
 	return response.Body, nil
 }
@@ -336,7 +367,7 @@ func (c *Client) UploadFile(
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("engine returned %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+		return decodeAPIError(response.StatusCode, message)
 	}
 	return nil
 }
@@ -364,10 +395,7 @@ func (c *Client) OpenFileDownload(ctx context.Context, serverID, path string) (F
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return FileDownload{}, fmt.Errorf(
-			"engine returned %d: %s",
-			response.StatusCode, strings.TrimSpace(string(message)),
-		)
+		return FileDownload{}, decodeAPIError(response.StatusCode, message)
 	}
 	return FileDownload{
 		Body:               response.Body,
@@ -397,6 +425,16 @@ func (c *Client) DeleteFile(ctx context.Context, serverID, path string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/servers/"+serverID+"/files", map[string]string{
 		"path": path,
 	}, nil)
+}
+
+func (c *Client) RenameFile(ctx context.Context, serverID, path, newName string) (string, error) {
+	var result map[string]string
+	if err := c.do(ctx, http.MethodPatch, "/v1/servers/"+serverID+"/files", map[string]string{
+		"path": path, "new_name": newName,
+	}, &result); err != nil {
+		return "", err
+	}
+	return result["path"], nil
 }
 
 func (c *Client) CreateBackup(
@@ -438,9 +476,7 @@ func (c *Client) OpenBackup(ctx context.Context, serverID, backupID string) (Fil
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return FileDownload{}, fmt.Errorf(
-			"engine returned %d: %s", response.StatusCode, strings.TrimSpace(string(message)),
-		)
+		return FileDownload{}, decodeAPIError(response.StatusCode, message)
 	}
 	return FileDownload{
 		Body: response.Body, ContentType: response.Header.Get("Content-Type"),
@@ -526,7 +562,7 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("engine returned %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+		return decodeAPIError(response.StatusCode, message)
 	}
 	if output != nil {
 		if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(output); err != nil {
@@ -534,4 +570,31 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 		}
 	}
 	return nil
+}
+
+func decodeAPIError(status int, document []byte) error {
+	var payload struct {
+		Code   string `json:"code"`
+		Error  string `json:"error"`
+		Detail string `json:"detail"`
+	}
+	_ = json.Unmarshal(document, &payload)
+	detail := strings.TrimSpace(payload.Detail)
+	if detail == "" {
+		detail = strings.TrimSpace(payload.Error)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(string(document))
+	}
+	if len(detail) > 2000 {
+		detail = detail[:2000]
+	}
+	code := strings.TrimSpace(payload.Code)
+	if code == "" {
+		code = "engine_request_failed"
+	}
+	return &APIError{
+		Status: status, Code: code, Detail: detail,
+		Retryable: status == http.StatusTooManyRequests || status >= 500,
+	}
 }

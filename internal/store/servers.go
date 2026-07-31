@@ -53,7 +53,6 @@ type ServerRuntime struct {
 	StartedAt       *time.Time `json:"started_at"`
 	ExitCode        *int       `json:"exit_code"`
 	LastError       *string    `json:"last_error"`
-	CommandReady    bool       `json:"command_ready"`
 	ObservedAt      time.Time  `json:"observed_at"`
 }
 
@@ -375,7 +374,7 @@ const serverSelect = `
 		rt.observed_state, rt.health, rt.cpu_percent, rt.memory_bytes,
 		rt.memory_limit_bytes, rt.network_rx_bytes, rt.network_tx_bytes,
 		rt.block_read_bytes, rt.block_write_bytes, rt.disk_bytes,
-		rt.started_at, rt.exit_code, rt.last_error, rt.command_ready, rt.observed_at,
+		rt.started_at, rt.exit_code, rt.last_error, rt.observed_at,
 		s.version, s.created_at, s.updated_at
 	FROM servers s
 	JOIN template_versions tv ON tv.id = s.template_version_id
@@ -417,7 +416,7 @@ func scanServer(row rowScanner) (ServerSummary, error) {
 		&item.Runtime.NetworkRXBytes, &item.Runtime.NetworkTXBytes,
 		&item.Runtime.BlockReadBytes, &item.Runtime.BlockWriteBytes,
 		&item.Runtime.DiskBytes, &item.Runtime.StartedAt, &item.Runtime.ExitCode,
-		&item.Runtime.LastError, &item.Runtime.CommandReady, &item.Runtime.ObservedAt,
+		&item.Runtime.LastError, &item.Runtime.ObservedAt,
 		&item.Version, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -531,6 +530,7 @@ func (s *Store) ProvisionJob(ctx context.Context, serverID, operationID string, 
 		return ProvisionJob{}, err
 	}
 	environment["SERVER_IP"] = "0.0.0.0"
+	applyTemplatePortEnvironment(environment, canonical.NetworkPorts)
 	var primary ServerPort
 	enginePorts := make([]engineclient.Port, 0, len(ports))
 	for _, port := range ports {
@@ -710,7 +710,7 @@ func (s *Store) MarkProvisionSucceeded(ctx context.Context, job ProvisionJob, re
 		UPDATE server_runtime
 		SET observed_state = $2, health = 'unknown',
 		    started_at = CASE WHEN $2 = 'running' THEN now() ELSE NULL END,
-		    last_error = NULL, command_ready = ($2 = 'running'), observed_at = now()
+		    last_error = NULL, observed_at = now()
 		WHERE server_id = $1
 	`, job.ServerID, status); err != nil {
 		return err
@@ -847,13 +847,6 @@ func (s *Store) requestPower(
 	`, serverID, transition, desired); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE server_runtime
-		SET command_ready = false, observed_at = now()
-		WHERE server_id = $1
-	`, serverID); err != nil {
-		return "", err
-	}
 	operationID, err := identity.NewUUID()
 	if err != nil {
 		return "", err
@@ -966,7 +959,7 @@ func (s *Store) FinishPower(
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE server_runtime
-		SET observed_state = $2, command_ready = ($2 = 'running'),
+		SET observed_state = $2,
 		    started_at = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
 		    observed_at = now()
 		WHERE server_id = $1

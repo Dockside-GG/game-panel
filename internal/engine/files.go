@@ -97,13 +97,32 @@ if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then exit 43; fi
 rm -rf "$candidate"
 `
 
+const renamePathScript = `
+set -eu
+root="$(realpath /mnt/server)"
+parent_rel="${TARGET%/*}"
+base="${TARGET##*/}"
+if [ "$parent_rel" = "$TARGET" ]; then parent_rel=.; fi
+parent="$root"
+if [ "$parent_rel" != "." ]; then parent="$root/$parent_rel"; fi
+resolved_parent="$(realpath "$parent")"
+case "$resolved_parent" in "$root"|"$root"/*) ;; *) exit 40 ;; esac
+[ -n "$base" ] && [ "$base" != "." ] && [ "$base" != ".." ] || exit 42
+source="$resolved_parent/$base"
+destination="$resolved_parent/$NEW_NAME"
+if [ ! -e "$source" ] && [ ! -L "$source" ]; then exit 43; fi
+if [ -e "$destination" ] || [ -L "$destination" ]; then exit 44; fi
+mv -- "$source" "$destination"
+`
+
 type fileWriteRequest struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
 
 type filePathRequest struct {
-	Path string `json:"path"`
+	Path    string `json:"path"`
+	NewName string `json:"new_name,omitempty"`
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -355,6 +374,42 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 	s.mutatePath(w, r, deletePathScript, http.StatusNoContent)
 }
 
+func (s *Server) renameFile(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "serverID")
+	if !uuidPattern.MatchString(serverID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid server id"})
+		return
+	}
+	var input filePathRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rename request"})
+		return
+	}
+	relative, err := safeRelativePath(input.Path, false)
+	newName := strings.TrimSpace(input.NewName)
+	if err != nil || !safeFileName(newName) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid file path or new name"})
+		return
+	}
+	if path.Base(relative) == newName {
+		writeJSON(w, http.StatusOK, map[string]string{"path": relative})
+		return
+	}
+	if _, err := s.runVolumeHelper(r.Context(), serverID, renamePathScript, map[string]string{
+		"TARGET": relative, "NEW_NAME": newName,
+	}); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "rename failed; the destination may already exist"})
+		return
+	}
+	newPath := newName
+	if parent := path.Dir(relative); parent != "." {
+		newPath = parent + "/" + newName
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": newPath})
+}
+
 func (s *Server) mutatePath(w http.ResponseWriter, r *http.Request, script string, status int) {
 	serverID := chi.URLParam(r, "serverID")
 	if !uuidPattern.MatchString(serverID) {
@@ -410,6 +465,12 @@ func safeRelativePath(value string, allowRoot bool) (string, error) {
 		return "", errors.New("root operation forbidden")
 	}
 	return cleaned, nil
+}
+
+func safeFileName(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		len(value) <= 255 && !strings.ContainsAny(value, `/\`) &&
+		!strings.ContainsRune(value, 0)
 }
 
 func (s *Server) runVolumeHelper(

@@ -48,7 +48,8 @@ type ServerConfiguration struct {
 	CommandTransport templates.CommandTransport    `json:"command_transport"`
 	BackupDefaults   templates.BackupDefaults      `json:"backup_defaults"`
 
-	environment map[string]string
+	TemplateNetworkPorts []templates.NetworkPort `json:"-"`
+	environment          map[string]string
 }
 
 func (c ServerConfiguration) RuntimeRequest() engineclient.ReconfigureRequest {
@@ -75,6 +76,19 @@ func (c ServerConfiguration) RuntimeRequest() engineclient.ReconfigureRequest {
 			PidsLimit:              intToInt64(c.Resources.PidsLimit),
 			IOWeight:               c.Resources.IOWeight,
 		},
+	}
+}
+
+func (c ServerConfiguration) InstallSpec(canonical templates.CanonicalTemplate) *engineclient.InstallSpec {
+	if strings.TrimSpace(canonical.InstallContainer) == "" ||
+		strings.TrimSpace(canonical.InstallScript) == "" {
+		return nil
+	}
+	return &engineclient.InstallSpec{
+		Image:       canonical.InstallContainer,
+		Entrypoint:  canonical.InstallEntrypoint,
+		Script:      canonical.InstallScript,
+		Environment: copyStringMap(c.environment),
 	}
 }
 
@@ -223,6 +237,7 @@ func (s *Store) ServerConfiguration(
 	result.environment = make(map[string]string, len(canonical.Variables)+3)
 	result.CommandTransport = canonical.CommandTransport
 	result.BackupDefaults = canonical.BackupDefaults
+	result.TemplateNetworkPorts = append([]templates.NetworkPort(nil), canonical.NetworkPorts...)
 	if encoded, err := json.Marshal(canonical.CommandTransport); err == nil {
 		result.environment["DOCKSIDE_COMMAND_TRANSPORT"] = string(encoded)
 	}
@@ -291,12 +306,26 @@ func (s *Store) ServerConfiguration(
 			Custom:       customVariables[definition.Environment],
 		})
 	}
+	applyTemplatePortEnvironment(result.environment, canonical.NetworkPorts)
 	result.Ports, err = s.ServerPorts(ctx, serverID)
 	if err != nil {
 		return result, err
 	}
 	result.refreshEffectiveValues()
 	return result, nil
+}
+
+func applyTemplatePortEnvironment(
+	environment map[string]string,
+	definitions []templates.NetworkPort,
+) {
+	for _, port := range definitions {
+		name := strings.ToUpper(strings.TrimSpace(port.Environment))
+		if name == "" || port.ContainerPort < 1 || port.ContainerPort > 65535 {
+			continue
+		}
+		environment[name] = strconv.Itoa(port.ContainerPort)
+	}
 }
 
 func (s *Store) ServerPorts(ctx context.Context, serverID string) ([]ServerPort, error) {

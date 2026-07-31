@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/dockside-gg/game-panel/internal/identity"
@@ -11,15 +12,15 @@ import (
 )
 
 type createWebhookRequest struct {
-	Name          string   `json:"name"`
-	Kind          string   `json:"kind"`
-	URL           string   `json:"url"`
-	SigningSecret string   `json:"signing_secret"`
-	EventFilters  []string `json:"event_filters"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
-type webhookEnabledRequest struct {
-	Enabled bool `json:"enabled"`
+type updateWebhookRequest struct {
+	Enabled        *bool    `json:"enabled,omitempty"`
+	DeliverEvents  *bool    `json:"deliver_events,omitempty"`
+	DeliverBackups *bool    `json:"deliver_backups,omitempty"`
+	EventFilters   []string `json:"event_filters,omitempty"`
 }
 
 func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
@@ -48,46 +49,34 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
 	input.URL = strings.TrimSpace(input.URL)
-	input.SigningSecret = strings.TrimSpace(input.SigningSecret)
-	if input.Name == "" || len(input.Name) > 120 ||
-		(input.Kind != "discord" && input.Kind != "generic") ||
-		len(input.EventFilters) > 100 || len(input.SigningSecret) > 512 {
+	if input.Name == "" || len(input.Name) > 120 {
 		writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid webhook configuration")))
 		return
 	}
-	if err := webhooks.ValidateURL(input.URL, input.Kind); err != nil {
+	kind := webhookKind(input.URL)
+	if err := webhooks.ValidateURL(input.URL, kind); err != nil {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
 	}
-	for _, filter := range input.EventFilters {
-		if strings.TrimSpace(filter) == "" || len(filter) > 160 {
-			writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid webhook event filter")))
-			return
-		}
-	}
-	generatedSecret := ""
-	if input.Kind == "generic" && input.SigningSecret == "" {
+	signingSecret := ""
+	if kind == "generic" {
 		var err error
-		generatedSecret, err = identity.Token(32)
+		signingSecret, err = identity.Token(32)
 		if err != nil {
 			writeProblem(w, r, err)
 			return
 		}
-		input.SigningSecret = generatedSecret
 	}
 	item, err := s.store.CreateWebhook(
-		r.Context(), serverID, session.User.ID, input.Name, input.Kind,
-		input.URL, input.SigningSecret, input.EventFilters, s.box,
+		r.Context(), serverID, session.User.ID, input.Name, kind,
+		input.URL, signingSecret, s.box,
 	)
 	if err != nil {
 		writeProblem(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"webhook": item, "signing_secret": generatedSecret,
-	})
+	writeJSON(w, http.StatusCreated, map[string]any{"webhook": item})
 }
 
 func (s *Server) setWebhookEnabled(w http.ResponseWriter, r *http.Request) {
@@ -96,17 +85,42 @@ func (s *Server) setWebhookEnabled(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errForbidden)
 		return
 	}
-	var input webhookEnabledRequest
+	var input updateWebhookRequest
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if err := s.store.SetWebhookEnabled(
-		r.Context(), chi.URLParam(r, "serverID"), chi.URLParam(r, "webhookID"), input.Enabled,
+	if len(input.EventFilters) > 100 {
+		writeProblem(w, r, errors.Join(errBadRequest, errors.New("too many webhook filters")))
+		return
+	}
+	for index := range input.EventFilters {
+		input.EventFilters[index] = strings.TrimSpace(input.EventFilters[index])
+		if input.EventFilters[index] == "" || len(input.EventFilters[index]) > 160 {
+			writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid webhook event filter")))
+			return
+		}
+	}
+	if err := s.store.UpdateWebhook(
+		r.Context(), chi.URLParam(r, "serverID"), chi.URLParam(r, "webhookID"),
+		input.Enabled, input.DeliverEvents, input.DeliverBackups, input.EventFilters,
 	); err != nil {
 		writeProblem(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func webhookKind(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "generic"
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if (host == "discord.com" || host == "discordapp.com") &&
+		strings.HasPrefix(parsed.Path, "/api/webhooks/") {
+		return "discord"
+	}
+	return "generic"
 }
 
 func (s *Server) testWebhook(w http.ResponseWriter, r *http.Request) {
@@ -115,13 +129,45 @@ func (s *Server) testWebhook(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errForbidden)
 		return
 	}
-	if err := s.store.QueueWebhookTest(
+	delivery, err := s.store.QueueWebhookTest(
 		r.Context(), chi.URLParam(r, "serverID"), session.User.ID, chi.URLParam(r, "webhookID"),
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"delivery": delivery})
+}
+
+func (s *Server) webhookDelivery(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.WebhookDeliveryByID(
+		r.Context(), chi.URLParam(r, "serverID"), chi.URLParam(r, "webhookID"),
+		chi.URLParam(r, "deliveryID"),
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"delivery": item})
+}
+
+func (s *Server) retryWebhookDelivery(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.RetryWebhookDelivery(
+		r.Context(), chi.URLParam(r, "serverID"), chi.URLParam(r, "webhookID"),
+		chi.URLParam(r, "deliveryID"),
 	); err != nil {
 		writeProblem(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	item, err := s.store.WebhookDeliveryByID(
+		r.Context(), chi.URLParam(r, "serverID"), chi.URLParam(r, "webhookID"),
+		chi.URLParam(r, "deliveryID"),
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"delivery": item})
 }
 
 func (s *Server) deleteWebhook(w http.ResponseWriter, r *http.Request) {

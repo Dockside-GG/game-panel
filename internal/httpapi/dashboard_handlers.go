@@ -1,7 +1,11 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -72,4 +76,33 @@ func (s *Server) restartSystemWorker(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("record worker restart audit failed", "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	entries, err := s.store.Diagnostics(r.Context(), limit)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
+func (s *Server) systemContainerLogs(w http.ResponseWriter, r *http.Request) {
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	if tail == 0 {
+		tail = 250
+	}
+	if tail < 20 || tail > 2000 {
+		writeProblem(w, r, errors.Join(errBadRequest, errors.New("tail must be 20-2000")))
+		return
+	}
+	result, err := s.engine.SystemContainerLogs(
+		r.Context(), chi.URLParam(r, "component"), tail,
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

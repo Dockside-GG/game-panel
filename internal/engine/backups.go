@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/dockside-gg/game-panel/internal/engineclient"
@@ -227,33 +228,64 @@ func (s *Server) restoreServerVolume(ctx context.Context, serverID, backupID, ex
 		return errors.New("server must be stopped before restoring a backup")
 	}
 	filename := s.backupFilename(serverID, backupID)
+	if err := verifyBackupArchive(filename, expectedHash); err != nil {
+		return err
+	}
+
+	// A restore never destroys the current volume without first creating an
+	// engine-local rollback point. The safety archive is not exposed as a user
+	// backup and is removed after either a successful restore or rollback.
+	safetyID := fmt.Sprintf("restore-safety-%d", time.Now().UTC().UnixNano())
+	if _, err := s.archiveServerVolume(ctx, serverID, safetyID, nil, nil); err != nil {
+		return fmt.Errorf("create pre-restore safety archive: %w", err)
+	}
+	safetyFilename := s.backupFilename(serverID, safetyID)
+	defer os.Remove(safetyFilename)
+
+	if err := s.replaceServerVolumeFromArchive(ctx, serverID, containerID, filename); err != nil {
+		rollbackErr := s.replaceServerVolumeFromArchive(
+			context.WithoutCancel(ctx), serverID, containerID, safetyFilename,
+		)
+		if rollbackErr != nil {
+			return fmt.Errorf("restore failed: %v; rollback also failed: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("restore failed and the original volume was restored: %w", err)
+	}
+	return nil
+}
+
+func verifyBackupArchive(filename, expectedHash string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("open backup: %w", err)
 	}
+	defer file.Close()
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil {
-		file.Close()
 		return err
 	}
 	if hex.EncodeToString(digest.Sum(nil)) != expectedHash {
-		file.Close()
 		return errors.New("backup checksum mismatch")
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		file.Close()
-		return err
+	return nil
+}
+
+func (s *Server) replaceServerVolumeFromArchive(
+	ctx context.Context,
+	serverID, containerID, filename string,
+) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("open restore archive: %w", err)
 	}
+	defer file.Close()
 	if _, err := s.runVolumeHelper(ctx, serverID, clearVolumeScript, nil); err != nil {
-		file.Close()
 		return fmt.Errorf("clear server volume: %w", err)
 	}
 	uncompressed, err := gzip.NewReader(file)
 	if err != nil {
-		file.Close()
 		return fmt.Errorf("open compressed backup: %w", err)
 	}
-	defer file.Close()
 	defer uncompressed.Close()
 	if err := s.docker.CopyToContainer(ctx, containerID, "/home/container", uncompressed, container.CopyToContainerOptions{
 		CopyUIDGID: true,

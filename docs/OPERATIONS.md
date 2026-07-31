@@ -22,7 +22,7 @@ work. Emergency kill has a separate direct path and remains available while a
 server is starting, restarting, or stopping. Completion of an interrupted restart
 cannot overwrite the later kill result.
 
-Bundled templates are immutable. Use **Customize template** to create a local,
+Catalog-managed templates are immutable. Use **Customize template** to create a local,
 versioned Dockside fork; existing servers remain pinned to the version with which
 they were provisioned.
 
@@ -35,7 +35,8 @@ docker compose --env-file .env logs --tail 200 app worker engine postgres gatewa
 
 - `gateway` terminates or receives HTTP and proxies only the app.
 - `app` serves the UI/API and runs migrations.
-- `worker` performs provisioning, schedules, backups, telemetry, log classification, and webhook delivery.
+- `worker` performs provisioning, schedules, backups, telemetry, recovery, and
+  webhook delivery.
 - `engine` is the only service with the Docker socket.
 - `postgres` stores panel metadata and job state.
 
@@ -89,7 +90,13 @@ Panel-created game backups are checksummed tar-gzip archives under `data/backups
 
 A manual or scheduled backup can optionally deliver an attachment through an enabled Discord webhook belonging to that server. Dockside keeps the native `.tar.gz` as the restore object and can stream either that archive or a ZIP export without loading the complete backup into worker memory. Discord's default webhook attachment limit is 10 MiB; larger backups remain valid locally and are marked `too_large` instead of being truncated or repeatedly uploaded. Discord delivery is an external copy and may expose world data or configuration secrets to members who can access the destination channel.
 
-Each manual or scheduled backup can specify 1–3650 retention days. Leaving retention blank keeps the archive until it is manually deleted. The worker removes expired, unlocked backups; locking an archive exempts it from retention cleanup. A restore requires the game server to be stopped and exact server/backup name confirmation.
+Each manual or scheduled backup can specify 1–3650 retention days. Leaving
+retention blank keeps the archive until it is manually deleted. The worker
+removes expired, unlocked backups; locking an archive exempts it from retention
+cleanup. Restore is asynchronous: Dockside creates an internal rollback archive,
+stops a running server, verifies and restores the selected backup, and returns a
+previously running server to service. Deleting a backup uses a normal
+confirmation and does not require retyping its name.
 
 The file manager downloads regular files without the browser editor's size/text restriction. Downloading a directory—or the current server directory—streams a complete `.tar.gz` archive.
 
@@ -118,15 +125,22 @@ Discord destinations must use Discord’s HTTPS webhook URL. Generic destination
 
 The signing secret is shown once. Dockside blocks loopback, private, link-local, multicast, and redirect targets to reduce SSRF risk. Retry-After and bounded exponential retry are honored.
 
-Console warnings/errors are classified from timestamped Docker logs, deduplicated, stripped of control characters, and redact common password/token patterns before activity/webhook delivery.
-
-Routine stderr output is retained in the raw console but does not become an error event merely because a game wrote it to stderr. The console colors messages by classified severity.
+Game process stdout and stderr are retained and streamed as raw console output.
+Dockside does not infer game errors, warnings, events, or health from message
+text because those meanings are game-specific. Structured diagnostics and
+webhook events cover panel API, worker job, engine operation, Docker control,
+lifecycle, schedule, backup, and delivery failures. Installer progress copied
+into operation history is control-character stripped and secret-redacted.
 
 ## Game network allocations
 
 New servers derive network questions from the immutable template version. A template can declare multiple TCP/UDP allocations, identify exactly one primary game port, keep administrative ports internal by default, and associate ports with startup variables. `SERVER_PORT` is the primary container listener and `SERVER_PUBLIC_PORT` is the published Docker host port.
 
-Imported Pelican and Pterodactyl definitions do not consistently encode TCP/UDP metadata. Dockside infers only unambiguous administration/query ports, supplies curated defaults for supported definitions, and requires the owner to answer ambiguous ports or protocols during provisioning. Custom definitions can declare a `dockside.network_ports` array:
+Imported Pelican and Pterodactyl definitions do not consistently encode TCP/UDP
+metadata. Dockside infers only generic, unambiguous allocation-shaped variables
+and requires the owner to answer unknown ports or protocols during provisioning;
+it never guesses from a game name. Custom definitions can declare a
+`dockside.network_ports` array:
 
 ```json
 {
@@ -140,12 +154,15 @@ Imported Pelican and Pterodactyl definitions do not consistently encode TCP/UDP 
         "primary": true,
         "required": true,
         "published": true,
+        "internal_only": false,
         "environment": "SERVER_PORT"
       }
     ]
   }
 }
 ```
+
+Non-primary ports may instead be optional/public, optional/private by default, or internal-only. Internal-only listeners are never included in Docker host bindings, and the provisioning API rejects attempts to publish them. REST console transports already call localhost inside the game container and do not need a public host allocation.
 
 `0.0.0.0` is a bind address, not a client destination. Use `127.0.0.1:<host port>` locally, the host LAN address on the local network, or the configured public DNS address externally. Firewalls and routers must allow or forward the same protocol shown by Dockside.
 

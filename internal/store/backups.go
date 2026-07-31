@@ -10,27 +10,28 @@ import (
 
 	"github.com/dockside-gg/game-panel/internal/engineclient"
 	"github.com/dockside-gg/game-panel/internal/identity"
+	"github.com/dockside-gg/game-panel/internal/sanitize"
 	"github.com/jackc/pgx/v5"
 )
 
 type Backup struct {
-	ID            string          `json:"id"`
-	ServerID      string          `json:"server_id"`
-	Name          string          `json:"name"`
-	Status        string          `json:"status"`
-	StorageKind   string          `json:"storage_kind"`
-	ObjectKey     *string         `json:"object_key"`
-	SizeBytes     *int64          `json:"size_bytes"`
-	SHA256        *string         `json:"sha256"`
-	IncludePaths  []string        `json:"include_paths"`
-	ExcludeGlobs  []string        `json:"exclude_globs"`
-	Locked        bool            `json:"locked"`
-	RetentionDays *int            `json:"retention_days"`
-	ExpiresAt     *time.Time      `json:"expires_at"`
-	CreatedBy     *string         `json:"created_by"`
-	CreatedAt     time.Time       `json:"created_at"`
-	CompletedAt   *time.Time      `json:"completed_at"`
-	Delivery      *BackupDelivery `json:"discord_delivery,omitempty"`
+	ID            string           `json:"id"`
+	ServerID      string           `json:"server_id"`
+	Name          string           `json:"name"`
+	Status        string           `json:"status"`
+	StorageKind   string           `json:"storage_kind"`
+	ObjectKey     *string          `json:"object_key"`
+	SizeBytes     *int64           `json:"size_bytes"`
+	SHA256        *string          `json:"sha256"`
+	IncludePaths  []string         `json:"include_paths"`
+	ExcludeGlobs  []string         `json:"exclude_globs"`
+	Locked        bool             `json:"locked"`
+	RetentionDays *int             `json:"retention_days"`
+	ExpiresAt     *time.Time       `json:"expires_at"`
+	CreatedBy     *string          `json:"created_by"`
+	CreatedAt     time.Time        `json:"created_at"`
+	CompletedAt   *time.Time       `json:"completed_at"`
+	Deliveries    []BackupDelivery `json:"discord_deliveries,omitempty"`
 }
 
 type BackupDelivery struct {
@@ -70,13 +71,19 @@ type ExpiredBackup struct {
 	ServerID string
 }
 
+type BackupRestoreJob struct {
+	OperationID string
+	BackupID    string
+	ServerID    string
+	SHA256      string
+	WasRunning  bool
+}
+
 func (s *Store) CreateBackup(
 	ctx context.Context,
 	serverID, actorID, name string,
 	includePaths, excludeGlobs []string,
 	retentionDays *int,
-	destinationID *string,
-	deliveryFormat string,
 ) (Backup, error) {
 	backupID, err := identity.NewUUID()
 	if err != nil {
@@ -102,6 +109,10 @@ func (s *Store) CreateBackup(
 			EXISTS(
 				SELECT 1 FROM backups
 				WHERE server_id = $1 AND status IN ('queued', 'running')
+			) OR EXISTS(
+				SELECT 1 FROM operations
+				WHERE server_id = $1
+				  AND status IN ('pending', 'running')
 			)
 	`, serverID).Scan(&exists, &active); err != nil {
 		return Backup{}, err
@@ -114,23 +125,6 @@ func (s *Store) CreateBackup(
 	}
 	if retentionDays != nil && (*retentionDays < 1 || *retentionDays > 3650) {
 		return Backup{}, ErrConflict
-	}
-	if destinationID != nil {
-		if deliveryFormat != "archive" && deliveryFormat != "zip" {
-			return Backup{}, ErrConflict
-		}
-		var destinationExists bool
-		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM webhook_destinations
-				WHERE id = $1 AND server_id = $2 AND kind = 'discord' AND enabled
-			)
-		`, *destinationID, serverID).Scan(&destinationExists); err != nil {
-			return Backup{}, err
-		}
-		if !destinationExists {
-			return Backup{}, ErrNotFound
-		}
 	}
 	includeDocument, err := json.Marshal(includePaths)
 	if err != nil {
@@ -166,25 +160,48 @@ func (s *Store) CreateBackup(
 	if err != nil {
 		return Backup{}, fmt.Errorf("create backup: %w", err)
 	}
-	if destinationID != nil {
+	destinations, err := tx.Query(ctx, `
+		SELECT id, name
+		FROM webhook_destinations
+		WHERE server_id = $1 AND kind = 'discord' AND enabled AND deliver_backups
+		ORDER BY created_at
+	`, serverID)
+	if err != nil {
+		return Backup{}, err
+	}
+	type backupDestination struct {
+		id   string
+		name string
+	}
+	enabledDestinations := make([]backupDestination, 0)
+	for destinations.Next() {
+		var destination backupDestination
+		if err := destinations.Scan(&destination.id, &destination.name); err != nil {
+			destinations.Close()
+			return Backup{}, err
+		}
+		enabledDestinations = append(enabledDestinations, destination)
+	}
+	if err := destinations.Err(); err != nil {
+		destinations.Close()
+		return Backup{}, err
+	}
+	destinations.Close()
+	for _, destination := range enabledDestinations {
 		deliveryID, err := identity.NewUUID()
 		if err != nil {
 			return Backup{}, err
 		}
-		var destinationName string
-		if err := tx.QueryRow(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO backup_deliveries(id, backup_id, destination_id, format)
-			VALUES ($1, $2, $3, $4)
-			RETURNING (
-				SELECT name FROM webhook_destinations WHERE id = $3
-			)
-		`, deliveryID, backupID, *destinationID, deliveryFormat).Scan(&destinationName); err != nil {
+			VALUES ($1, $2, $3, 'zip')
+		`, deliveryID, backupID, destination.id); err != nil {
 			return Backup{}, err
 		}
-		result.Delivery = &BackupDelivery{
-			ID: deliveryID, DestinationID: *destinationID,
-			DestinationName: destinationName, Format: deliveryFormat, Status: "pending",
-		}
+		result.Deliveries = append(result.Deliveries, BackupDelivery{
+			ID: deliveryID, DestinationID: destination.id,
+			DestinationName: destination.name, Format: "zip", Status: "pending",
+		})
 	}
 	payload, err := json.Marshal(map[string]string{"backup_id": backupID})
 	if err != nil {
@@ -220,13 +237,8 @@ func (s *Store) ListBackups(ctx context.Context, serverID string) ([]Backup, err
 		       backup.storage_kind, backup.object_key, backup.size_bytes, backup.sha256,
 		       backup.include_paths, backup.exclude_globs, backup.locked,
 		       backup.retention_days, backup.expires_at, backup.created_by,
-		       backup.created_at, backup.completed_at,
-		       delivery.id, delivery.destination_id, destination.name, delivery.format,
-		       delivery.status, delivery.attempts, delivery.response_status,
-		       delivery.last_error, delivery.delivered_at
+		       backup.created_at, backup.completed_at
 		FROM backups AS backup
-		LEFT JOIN backup_deliveries AS delivery ON delivery.backup_id = backup.id
-		LEFT JOIN webhook_destinations AS destination ON destination.id = delivery.destination_id
 		WHERE backup.server_id = $1
 		ORDER BY backup.created_at DESC
 	`, serverID)
@@ -238,18 +250,11 @@ func (s *Store) ListBackups(ctx context.Context, serverID string) ([]Backup, err
 	for rows.Next() {
 		var item Backup
 		var includes, excludes []byte
-		var deliveryID, destinationID, destinationName, format, deliveryStatus *string
-		var deliveryAttempts *int
-		var responseStatus *int
-		var deliveryError *string
-		var deliveredAt *time.Time
 		if err := rows.Scan(
 			&item.ID, &item.ServerID, &item.Name, &item.Status, &item.StorageKind,
 			&item.ObjectKey, &item.SizeBytes, &item.SHA256, &includes, &excludes,
 			&item.Locked, &item.RetentionDays, &item.ExpiresAt,
 			&item.CreatedBy, &item.CreatedAt, &item.CompletedAt,
-			&deliveryID, &destinationID, &destinationName, &format, &deliveryStatus,
-			&deliveryAttempts, &responseStatus, &deliveryError, &deliveredAt,
 		); err != nil {
 			return nil, err
 		}
@@ -259,18 +264,46 @@ func (s *Store) ListBackups(ctx context.Context, serverID string) ([]Backup, err
 		if err := json.Unmarshal(excludes, &item.ExcludeGlobs); err != nil {
 			return nil, err
 		}
-		if deliveryID != nil {
-			item.Delivery = &BackupDelivery{
-				ID: *deliveryID, DestinationID: valueOr(destinationID, ""),
-				DestinationName: valueOr(destinationName, "Deleted webhook"),
-				Format:          valueOr(format, "archive"), Status: valueOr(deliveryStatus, "pending"),
-				Attempts: intOr(deliveryAttempts, 0), ResponseStatus: responseStatus,
-				LastError: deliveryError, DeliveredAt: deliveredAt,
-			}
-		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	byID := make(map[string]int, len(result))
+	for index := range result {
+		byID[result[index].ID] = index
+	}
+	deliveries, err := s.pool.Query(ctx, `
+		SELECT delivery.backup_id, delivery.id, delivery.destination_id,
+		       COALESCE(destination.name, 'Deleted webhook'), delivery.format,
+		       delivery.status, delivery.attempts, delivery.response_status,
+		       delivery.last_error, delivery.delivered_at
+		FROM backup_deliveries AS delivery
+		JOIN backups AS backup ON backup.id = delivery.backup_id
+		LEFT JOIN webhook_destinations AS destination ON destination.id = delivery.destination_id
+		WHERE backup.server_id = $1
+		ORDER BY delivery.created_at
+	`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer deliveries.Close()
+	for deliveries.Next() {
+		var backupID string
+		var item BackupDelivery
+		if err := deliveries.Scan(
+			&backupID, &item.ID, &item.DestinationID, &item.DestinationName,
+			&item.Format, &item.Status, &item.Attempts, &item.ResponseStatus,
+			&item.LastError, &item.DeliveredAt,
+		); err != nil {
+			return nil, err
+		}
+		if index, ok := byID[backupID]; ok {
+			result[index].Deliveries = append(result[index].Deliveries, item)
+		}
+	}
+	return result, deliveries.Err()
 }
 
 func (s *Store) BackupByID(ctx context.Context, serverID, backupID string) (Backup, error) {
@@ -301,6 +334,197 @@ func (s *Store) BackupByID(ctx context.Context, serverID, backupID string) (Back
 		return Backup{}, err
 	}
 	return item, nil
+}
+
+func (s *Store) QueueBackupRestore(
+	ctx context.Context,
+	serverID, backupID, actorID string,
+) (string, error) {
+	operationID, err := identity.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	outboxID, err := identity.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	activityID, err := identity.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	idempotencyKey, err := identity.Token(24)
+	if err != nil {
+		return "", err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var sha256, serverStatus, desiredState string
+	err = tx.QueryRow(ctx, `
+		SELECT backup.sha256, server.status, server.desired_state
+		FROM backups AS backup
+		JOIN servers AS server ON server.id = backup.server_id
+		WHERE backup.id = $1 AND backup.server_id = $2
+		  AND backup.status = 'succeeded' AND backup.sha256 IS NOT NULL
+		  AND server.deleted_at IS NULL
+		FOR UPDATE OF backup, server
+	`, backupID, serverID).Scan(&sha256, &serverStatus, &desiredState)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrConflict
+	}
+	if err != nil {
+		return "", err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM operations
+			WHERE server_id = $1 AND status IN ('pending', 'running')
+		) OR EXISTS(
+			SELECT 1 FROM backups
+			WHERE server_id = $1 AND status IN ('queued', 'running')
+		)
+	`, serverID).Scan(&active); err != nil {
+		return "", err
+	}
+	if active {
+		return "", fmt.Errorf("%w: another server or backup operation is active", ErrConflict)
+	}
+	wasRunning := desiredState == "running" ||
+		serverStatus == "running" || serverStatus == "starting" || serverStatus == "restarting"
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO operations(
+			id, server_id, actor_user_id, kind, idempotency_key, message
+		)
+		VALUES ($1, $2, $3, 'backup.restore', $4, 'Waiting for restore worker')
+	`, operationID, serverID, actorID, idempotencyKey); err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(BackupRestoreJob{
+		OperationID: operationID,
+		BackupID:    backupID,
+		ServerID:    serverID,
+		SHA256:      sha256,
+		WasRunning:  wasRunning,
+	})
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO outbox_events(id, topic, aggregate_id, payload)
+		VALUES ($1, 'backup.restore', $2, $3)
+	`, outboxID, serverID, payload); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE servers
+		SET desired_state = 'stopped', status = CASE
+			WHEN status IN ('running', 'starting', 'restarting') THEN 'stopping'
+			ELSE status
+		END,
+		stop_reason = 'requested', updated_at = now(), version = version + 1
+		WHERE id = $1
+	`, serverID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO activity_events(
+			id, server_id, actor_user_id, event_type, summary, data
+		)
+		VALUES (
+			$1, $2, $3, 'server.backup.restore.requested',
+			'Backup restore requested', $4
+		)
+	`, activityID, serverID, actorID, payload); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return operationID, nil
+}
+
+func (s *Store) MarkBackupRestoreRunning(
+	ctx context.Context,
+	job BackupRestoreJob,
+	progress int,
+	message string,
+) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE operations
+		SET status = 'running', started_at = COALESCE(started_at, now()),
+		    progress = $2, message = $3
+		WHERE id = $1 AND kind = 'backup.restore'
+	`, job.OperationID, progress, message)
+	return err
+}
+
+func (s *Store) FinishBackupRestore(
+	ctx context.Context,
+	job BackupRestoreJob,
+	restoreErr error,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	eventID, err := identity.NewUUID()
+	if err != nil {
+		return err
+	}
+	status, summary, operationStatus, operationMessage := "stopped", "Backup restored", "succeeded", "Restore completed"
+	eventType, severity := "server.backup.restored", "info"
+	if job.WasRunning {
+		status = "starting"
+	}
+	var detail *string
+	if restoreErr != nil {
+		sanitized := sanitize.Text(restoreErr.Error())
+		detail = &sanitized
+		summary, eventType, severity = "Backup restore failed", "server.backup.restore.failed", "error"
+		operationStatus, operationMessage = "failed", "Restore failed"
+		if job.WasRunning {
+			status = "starting"
+		} else {
+			status = "stopped"
+		}
+	}
+	desired := "stopped"
+	if job.WasRunning {
+		desired = "running"
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE servers
+		SET desired_state = $2, status = $3, stop_reason = NULL,
+		    updated_at = now(), version = version + 1
+		WHERE id = $1
+	`, job.ServerID, desired, status); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE operations
+		SET status = $2, progress = CASE WHEN $2 = 'succeeded' THEN 100 ELSE progress END,
+		    message = $3, error_code = CASE WHEN $2 = 'failed' THEN 'backup_restore_failed' END,
+		    error_detail = $4, completed_at = now()
+		WHERE id = $1
+	`, job.OperationID, operationStatus, operationMessage, detail); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO activity_events(
+			id, server_id, event_type, severity, summary, data
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, eventID, job.ServerID, eventType, severity, summary, map[string]any{
+		"backup_id": job.BackupID, "operation_id": job.OperationID, "error": detail,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) BackupJob(ctx context.Context, backupID string) (BackupJob, error) {
@@ -359,22 +583,40 @@ func (s *Store) MarkBackupSucceeded(ctx context.Context, job BackupJob, result e
 	}); err != nil {
 		return err
 	}
-	deliveryOutboxID, err := identity.NewUUID()
+	rows, err := tx.Query(ctx, `
+		UPDATE backup_deliveries
+		SET status = 'queued', updated_at = now()
+		WHERE backup_id = $1 AND status = 'pending'
+		RETURNING id
+	`, job.BackupID)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		WITH queued AS (
-			UPDATE backup_deliveries
-			SET status = 'queued', updated_at = now()
-			WHERE backup_id = $1 AND status = 'pending'
-			RETURNING id
-		)
-		INSERT INTO outbox_events(id, topic, aggregate_id, payload)
-		SELECT $2, 'backup.discord_delivery', $1, jsonb_build_object('delivery_id', queued.id)
-		FROM queued
-	`, job.BackupID, deliveryOutboxID); err != nil {
+	deliveryIDs := make([]string, 0)
+	for rows.Next() {
+		var deliveryID string
+		if err := rows.Scan(&deliveryID); err != nil {
+			rows.Close()
+			return err
+		}
+		deliveryIDs = append(deliveryIDs, deliveryID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
+	}
+	rows.Close()
+	for _, deliveryID := range deliveryIDs {
+		outboxID, err := identity.NewUUID()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO outbox_events(id, topic, aggregate_id, payload)
+			VALUES ($1, 'backup.discord_delivery', $2, jsonb_build_object('delivery_id', $3::text))
+		`, outboxID, job.BackupID, deliveryID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -413,7 +655,7 @@ func (s *Store) FinishBackupDelivery(
 ) error {
 	var detail *string
 	if deliveryErr != nil {
-		value := deliveryErr.Error()
+		value := sanitize.Text(deliveryErr.Error())
 		if len(value) > 2000 {
 			value = value[:2000]
 		}
@@ -462,6 +704,74 @@ func (s *Store) FinishBackupDelivery(
 		}); err != nil {
 			return err
 		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) RetryBackupDelivery(
+	ctx context.Context,
+	serverID, backupID, deliveryID, actorID string,
+) error {
+	outboxID, err := identity.NewUUID()
+	if err != nil {
+		return err
+	}
+	eventID, err := identity.NewUUID()
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var destinationName string
+	err = tx.QueryRow(ctx, `
+		UPDATE backup_deliveries AS delivery
+		SET status = 'queued', attempts = 0, response_status = NULL,
+		    last_error = NULL, delivered_at = NULL, updated_at = now()
+		FROM backups AS backup, webhook_destinations AS destination
+		WHERE delivery.id = $1
+		  AND backup.id = delivery.backup_id
+		  AND destination.id = delivery.destination_id
+		  AND backup.id = $2
+		  AND backup.server_id = $3
+		  AND backup.status = 'succeeded'
+		  AND destination.enabled
+		  AND destination.kind = 'discord'
+		  AND delivery.status IN ('failed', 'too_large')
+		RETURNING destination.name
+	`, deliveryID, backupID, serverID).Scan(&destinationName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrConflict
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO outbox_events(id, topic, aggregate_id, payload)
+		VALUES (
+			$1, 'backup.discord_delivery', $2,
+			jsonb_build_object('delivery_id', $3::text)
+		)
+	`, outboxID, backupID, deliveryID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO activity_events(
+			id, server_id, actor_user_id, event_type, summary, data
+		)
+		VALUES (
+			$1, $2, NULLIF($3, '')::uuid,
+			'server.backup.discord.retry', 'Discord backup delivery queued again',
+			jsonb_build_object(
+				'backup_id', $4::text,
+				'delivery_id', $5::text,
+				'destination_name', $6::text
+			)
+		)
+	`, eventID, serverID, actorID, backupID, deliveryID, destinationName); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -580,18 +890,6 @@ func (s *Store) ExpiredBackups(ctx context.Context, limit int) ([]ExpiredBackup,
 		items = append(items, item)
 	}
 	return items, rows.Err()
-}
-
-func (s *Store) RecordBackupRestore(ctx context.Context, serverID, backupID, actorID string) error {
-	eventID, err := identity.NewUUID()
-	if err != nil {
-		return err
-	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO activity_events(id, server_id, actor_user_id, event_type, summary, data)
-		VALUES ($1, $2, $3, 'server.backup.restored', 'Backup restored', $4)
-	`, eventID, serverID, actorID, map[string]any{"backup_id": backupID})
-	return err
 }
 
 func (s *Store) SetBackupLocked(ctx context.Context, serverID, backupID, actorID string, locked bool) error {

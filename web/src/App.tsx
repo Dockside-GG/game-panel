@@ -4,10 +4,12 @@ import {
   ArrowRight,
   Boxes,
   Check,
+  ChevronRight,
   CircleGauge,
   Clock3,
   Copy,
   Cpu,
+  FileWarning,
   Eye,
   EyeOff,
   HardDrive,
@@ -50,6 +52,8 @@ import type {
   SetupStatus,
   ServerSummary,
   SystemContainer,
+  SystemContainerLogs,
+  DiagnosticEntry,
   User,
 } from "./types";
 import { serverPresentation } from "./server-presentation";
@@ -145,6 +149,7 @@ function LoginPage() {
         <small>Dockside Game Panel · Self-hosted by design</small>
       </section>
       <main className="auth-main">
+        <div className="mobile-auth-brand"><Brand /></div>
         <div className="auth-card">
           {status.isLoading ? (
             <span className="loader" />
@@ -508,22 +513,27 @@ function FleetHealthPanel({ servers, loading }: { servers: ServerSummary[]; load
       <div><span className="eyebrow">FLEET HEALTH</span><h2>Live game-server resources</h2></div>
       <StatusBadge tone={servers.some((server) => serverPresentation(server).warning) ? "warning" : "success"}>{servers.length} visible</StatusBadge>
     </div>
-    {loading ? <TableLoading /> : servers.length ? <div className="dashboard-server-meters">
+    {loading ? <TableLoading /> : servers.length ? <div className="dashboard-fleet-table-wrap"><table className="dashboard-fleet-table">
+      <thead><tr><th>Server</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>I/O</th><th><span className="sr-only">Open</span></th></tr></thead>
+      <tbody>
       {servers.map((server) => {
         const cpuCapacity = server.resources.cpu_limit_millicores ? server.resources.cpu_limit_millicores / 10 : Math.max(server.runtime.cpu_percent ?? 0, 100);
         const cpu = cpuCapacity ? ((server.runtime.cpu_percent ?? 0) / cpuCapacity) * 100 : 0;
         const memoryCapacity = server.resources.memory_limit_bytes ?? server.runtime.memory_limit_bytes;
         const memory = memoryCapacity ? ((server.runtime.memory_bytes ?? 0) / memoryCapacity) * 100 : 0;
         const disk = server.resources.disk_limit_bytes ? ((server.runtime.disk_bytes ?? 0) / server.resources.disk_limit_bytes) * 100 : 0;
-        return <article key={server.id}>
-          <div className="dashboard-server-heading"><Link to={`/servers/${server.id}`}><strong>{server.name}</strong><span>{server.template_name}</span></Link><ServerStatus server={server} /></div>
-          <UsageMeter label="CPU" value={cpu} detail={`${formatPercent(server.runtime.cpu_percent)} current`} />
-          <UsageMeter label="Memory" value={memory} detail={`${formatBytes(server.runtime.memory_bytes)} / ${memoryCapacity ? formatBytes(memoryCapacity) : "unlimited"}`} available={Boolean(memoryCapacity)} />
-          <UsageMeter label="Disk" value={disk} detail={`${formatBytes(server.runtime.disk_bytes)}${server.resources.disk_limit_bytes ? ` / ${formatBytes(server.resources.disk_limit_bytes)}` : " · no alert limit"}`} available={Boolean(server.resources.disk_limit_bytes)} />
-          <small className="dashboard-server-io">Network {formatBytes((server.runtime.network_rx_bytes ?? 0) + (server.runtime.network_tx_bytes ?? 0))} · Block {formatBytes((server.runtime.block_read_bytes ?? 0) + (server.runtime.block_write_bytes ?? 0))}</small>
-        </article>;
+        return <tr key={server.id}>
+          <td data-label="Server"><Link className="dashboard-server-link" to={`/servers/${server.id}`}><strong>{server.name}</strong><span>{server.template_name}</span></Link></td>
+          <td data-label="Status"><ServerStatus server={server} /></td>
+          <td data-label="CPU"><UsageMeter label="CPU" value={cpu} detail={`${formatPercent(server.runtime.cpu_percent)} current`} /></td>
+          <td data-label="Memory"><UsageMeter label="Memory" value={memory} detail={`${formatBytes(server.runtime.memory_bytes)} / ${memoryCapacity ? formatBytes(memoryCapacity) : "unlimited"}`} available={Boolean(memoryCapacity)} /></td>
+          <td data-label="Disk"><UsageMeter label="Disk" value={disk} detail={`${formatBytes(server.runtime.disk_bytes)}${server.resources.disk_limit_bytes ? ` / ${formatBytes(server.resources.disk_limit_bytes)}` : " · no alert limit"}`} available={Boolean(server.resources.disk_limit_bytes)} /></td>
+          <td data-label="I/O"><small className="dashboard-server-io">Network {formatBytes((server.runtime.network_rx_bytes ?? 0) + (server.runtime.network_tx_bytes ?? 0))}<br />Block {formatBytes((server.runtime.block_read_bytes ?? 0) + (server.runtime.block_write_bytes ?? 0))}</small></td>
+          <td className="dashboard-server-open"><Link className="icon-button" to={`/servers/${server.id}`} aria-label={`Open ${server.name}`}><ChevronRight size={15} /></Link></td>
+        </tr>;
       })}
-    </div> : <EmptyState icon={Server} title="No live server telemetry yet" description="Provision a game server to see CPU, memory, disk, network, and block-I/O health here." />}
+      </tbody>
+    </table></div> : <EmptyState icon={Server} title="No live server telemetry yet" description="Provision a game server to see CPU, memory, disk, network, and block-I/O health here." />}
   </section>;
 }
 
@@ -543,7 +553,12 @@ function UsersPage() {
   });
   const installation = useQuery({
     queryKey: ["installation-settings"],
-    queryFn: () => api<{ mfa_policy: string }>("/api/v1/installation/settings"),
+    queryFn: () => api<{
+      public_url: string;
+      discord_client_id: string;
+      discord_secret_configured: boolean;
+      mfa_policy: string;
+    }>("/api/v1/installation/settings"),
   });
   return (
     <>
@@ -856,7 +871,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
         {!inviteURL ? (
           <>
             <p>The claimant stays pending with no panel visibility until you approve them.</p>
-            <label>Label <input value={label} maxLength={120} placeholder="Alex — Minecraft team" onChange={(event) => setLabel(event.target.value)} /></label>
+            <label>Label <input value={label} maxLength={120} placeholder="Alex — weekend moderators" onChange={(event) => setLabel(event.target.value)} /></label>
             <label>Expires after
               <select value={hours} onChange={(event) => setHours(Number(event.target.value))}>
                 <option value={1}>1 hour</option>
@@ -925,7 +940,12 @@ function PanelSettingsPage() {
   });
   const installation = useQuery({
     queryKey: ["installation-settings"],
-    queryFn: () => api<{ mfa_policy: string }>("/api/v1/installation/settings"),
+    queryFn: () => api<{
+      mfa_policy: string;
+      public_url: string;
+      discord_client_id: string;
+      discord_secret_configured: boolean;
+    }>("/api/v1/installation/settings"),
     enabled: session.data?.user.panel_role === "owner",
   });
   if (session.isLoading) return <PageLoading title="Panel settings" />;
@@ -976,9 +996,162 @@ function PanelSettingsPage() {
           <div><dt>Owner bootstrap</dt><dd>{setup.data?.bootstrap_enabled ? "Awaiting first claim" : "Consumed and disabled"}</dd></div>
         </dl>
       </section>
+      {installation.data && <DiscordOAuthSettings settings={installation.data} />}
       <section className="notice info">
-        The public URL and Discord client credentials are installation settings managed through <code>.env</code> and protected secret files. Use the upgrade/operations guide when changing them.
+        The public URL is selected during installation because it defines trusted browser origins, cookie security, and reverse-proxy routing. Discord credentials can be rotated above without restarting the panel.
       </section>
+    </>
+  );
+}
+
+function DiscordOAuthSettings({ settings }: {
+  settings: {
+    public_url: string;
+    discord_client_id: string;
+    discord_secret_configured: boolean;
+  };
+}) {
+  const queryClient = useQueryClient();
+  const [clientID, setClientID] = useState(settings.discord_client_id);
+  const [clientSecret, setClientSecret] = useState("");
+  const [showClientID, setShowClientID] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const callback = `${settings.public_url}/api/v1/auth/discord/callback`;
+  const save = useMutation({
+    mutationFn: () => api<void>("/api/v1/installation/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        discord_client_id: clientID.trim(),
+        discord_client_secret: clientSecret.trim() || undefined,
+      }),
+    }),
+    onSuccess: () => {
+      setClientSecret("");
+      void queryClient.invalidateQueries({ queryKey: ["installation-settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup-status"] });
+    },
+  });
+  return (
+    <section className="panel discord-settings">
+      <div className="panel-heading"><div><span className="eyebrow">EDIT AUTHENTICATION</span><h2>Discord credentials</h2></div><StatusBadge tone="success">Encrypted at rest</StatusBadge></div>
+      <div className="configuration-form">
+        <label>
+          Discord client ID
+          <span className="secret-input">
+            <input type={showClientID ? "text" : "password"} inputMode="numeric" value={clientID} onChange={(event) => setClientID(event.target.value.replace(/\D/g, ""))} />
+            <button type="button" className="icon-button" aria-label={showClientID ? "Hide Discord client ID" : "Show Discord client ID"} onClick={() => setShowClientID((value) => !value)}>{showClientID ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+          </span>
+        </label>
+        <label>
+          Replace Discord client secret
+          <span className="label-hint">Leave blank to keep the existing encrypted value. The saved secret is never returned to the browser.</span>
+          <span className="secret-input">
+            <input type={showSecret ? "text" : "password"} autoComplete="new-password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} placeholder={settings.discord_secret_configured ? "Secret configured" : "Enter client secret"} />
+            <button type="button" className="icon-button" aria-label={showSecret ? "Hide new Discord client secret" : "Show new Discord client secret"} onClick={() => setShowSecret((value) => !value)}>{showSecret ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+          </span>
+        </label>
+        <label>
+          Exact callback URI
+          <span className="copy-value"><code>{callback}</code><button type="button" className="button ghost compact" onClick={() => {
+            void navigator.clipboard.writeText(callback);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1800);
+          }}>{copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy"}</button></span>
+        </label>
+        <div className="notice info">Add this exact callback URI to the OAuth2 redirect list in the Discord developer portal. Changes take effect on the next sign-in attempt.</div>
+        {save.isError && <div className="form-error">{save.error.message}</div>}
+        {save.isSuccess && <div className="form-success">Discord authentication settings saved.</div>}
+        <div className="configuration-actions">
+          <button className="button primary" disabled={save.isPending || clientID.length < 17} onClick={() => save.mutate()}><ShieldCheck size={16} /> {save.isPending ? "Saving…" : "Save Discord settings"}</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DiagnosticsPage() {
+  const session = useSession();
+  const [component, setComponent] = useState("app");
+  const diagnostics = useQuery({
+    queryKey: ["diagnostics"],
+    queryFn: () => api<{ entries: DiagnosticEntry[] }>("/api/v1/diagnostics?limit=250"),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? ""),
+    refetchInterval: 15_000,
+  });
+  const containers = useQuery({
+    queryKey: ["system-containers"],
+    queryFn: () => api<{ containers: SystemContainer[] }>("/api/v1/system/containers"),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? ""),
+    refetchInterval: 15_000,
+  });
+  const logs = useQuery({
+    queryKey: ["system-container-logs", component],
+    queryFn: () => api<SystemContainerLogs>(`/api/v1/system/containers/${component}/logs?tail=500`),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? "") && Boolean(component),
+  });
+  if (session.isLoading) return <PageLoading title="Diagnostics" />;
+  if (!["owner", "administrator"].includes(session.data?.user.panel_role ?? "")) {
+    return (
+      <>
+        <PageHeader eyebrow="OPERATIONS" title="Diagnostics" description="Panel, engine, worker, and runtime failures." />
+        <section className="panel"><EmptyState icon={ShieldCheck} title="Administrator access required" description="The owner controls access by assigning the administrator panel role." /></section>
+      </>
+    );
+  }
+  const availableComponents = containers.data?.containers.map((item) => item.component) ?? [
+    "app", "worker", "engine", "gateway", "postgres",
+  ];
+  return (
+    <>
+      <PageHeader
+        eyebrow="OPERATIONS"
+        title="Diagnostics"
+        description="Sanitized panel, worker, engine, and Docker control-plane failures. Game process output remains in each server console and is never reclassified by the panel."
+        actions={<button className="button secondary" onClick={() => {
+          void diagnostics.refetch();
+          void containers.refetch();
+          void logs.refetch();
+        }}><RotateCw size={15} /> Refresh</button>}
+      />
+      <div className="diagnostics-layout">
+        <section className="panel">
+          <div className="panel-heading"><div><span className="eyebrow">CONTROL PLANE</span><h2>Operational failures</h2></div><StatusBadge tone={diagnostics.data?.entries.length ? "warning" : "success"}>{diagnostics.data?.entries.length ?? 0} recent</StatusBadge></div>
+          {diagnostics.isLoading && <TableLoading />}
+          {diagnostics.isError && <ErrorPanel error={diagnostics.error} retry={() => void diagnostics.refetch()} />}
+          {diagnostics.data?.entries.length === 0 && <EmptyState icon={ShieldCheck} title="No operational failures" description="No failed operations, runtime infrastructure errors, or blocked background jobs were found." />}
+          <div className="diagnostic-list">
+            {diagnostics.data?.entries.map((item, index) => (
+              <article key={`${item.source}-${item.created_at}-${index}`}>
+                <FileWarning size={17} />
+                <div>
+                  <div><strong>{item.summary}</strong><StatusBadge tone={item.severity === "error" ? "danger" : "warning"}>{item.source}</StatusBadge></div>
+                  <code>{item.code}</code>
+                  {item.detail && <pre>{item.detail}</pre>}
+                  <span>{formatDate(item.created_at)}{item.server_id ? <> · <Link to={`/servers/${item.server_id}/activity`}>Open server</Link></> : null}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="panel system-log-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">CONTAINER LOGS</span><h2>Dockside services</h2></div>
+            <select aria-label="System container" value={component} onChange={(event) => setComponent(event.target.value)}>
+              {availableComponents.map((item) => <option value={item} key={item}>{item}</option>)}
+            </select>
+          </div>
+          <p className="section-description">Read-only tail from the selected system container. The web UI cannot stop or restart the app, engine, gateway, or database.</p>
+          {logs.isLoading && <TableLoading />}
+          {logs.isError && <ErrorPanel error={logs.error} retry={() => void logs.refetch()} />}
+          {logs.data && (
+            <div className="system-log-streams">
+              <details open><summary>Standard output</summary><pre>{logs.data.stdout || "No stdout in this tail."}</pre></details>
+              <details open={Boolean(logs.data.stderr)}><summary>Standard error</summary><pre>{logs.data.stderr || "No stderr in this tail."}</pre></details>
+            </div>
+          )}
+        </section>
+      </div>
     </>
   );
 }
@@ -1172,6 +1345,7 @@ export function App() {
         <Route path="/templates/:versionID/edit" element={<TemplateEditorPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/diagnostics" element={<DiagnosticsPage />} />
         <Route path="/settings" element={<PanelSettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

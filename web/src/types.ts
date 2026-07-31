@@ -38,6 +38,23 @@ export type ActivityEvent = {
   created_at: string;
 };
 
+export type DiagnosticEntry = {
+  source: string;
+  severity: "warning" | "error";
+  code: string;
+  summary: string;
+  detail: string;
+  server_id?: string | null;
+  created_at: string;
+};
+
+export type SystemContainerLogs = {
+  component: string;
+  stdout: string;
+  stderr: string;
+  observed_at: string;
+};
+
 export type HostStatus = {
   connected?: boolean;
   instance_id?: string;
@@ -128,6 +145,8 @@ export type Problem = {
   status?: number;
   detail?: string;
   request_id?: string;
+  code?: string;
+  retryable?: boolean;
 };
 
 export type TemplateSummary = {
@@ -136,7 +155,7 @@ export type TemplateSummary = {
   slug: string;
   name: string;
   category: string;
-  source_kind: "pelican" | "pterodactyl" | "dockside" | "custom";
+  source_kind: "pelican" | "pterodactyl" | "dockside";
   author: string | null;
   description: string;
   trust_state: string;
@@ -148,6 +167,20 @@ export type TemplateSummary = {
     warnings: string[];
   };
   derived_from_version_id?: string;
+  catalog_managed: boolean;
+  catalog_version?: string;
+};
+
+export type TemplateCatalogStatus = {
+  catalog_url: string;
+  catalog_version: string | null;
+  etag?: string;
+  generated_at: string | null;
+  checked_at: string | null;
+  synced_at: string | null;
+  template_count: number;
+  status: "never" | "syncing" | "current" | "failed";
+  last_error?: string;
 };
 
 export type TemplateVariable = {
@@ -170,6 +203,7 @@ export type TemplateNetworkPort = {
   primary: boolean;
   required: boolean;
   published: boolean;
+  internal_only: boolean;
   environment?: string;
 };
 
@@ -193,6 +227,7 @@ export type TemplateDetail = TemplateSummary & {
     backup_defaults: BackupDefaults;
     resource_defaults: ResourceDefaults;
     file_denylist?: string[];
+    features?: unknown;
   };
   source_document: unknown;
 };
@@ -202,14 +237,29 @@ export type CommandTransport = {
   rcon_port_env?: string;
   rcon_password_env?: string;
   rest?: {
-    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     port: number;
     port_environment?: string;
-    path: string;
+    path?: string;
     body_template?: string;
     headers?: Record<string, string>;
     accepted_status?: number[];
     timeout_seconds?: number;
+    basic_auth?: {
+      username: string;
+      password_environment: string;
+    };
+    routes?: {
+      command: string;
+      aliases?: string[];
+      usage?: string;
+      min_args?: number;
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      path: string;
+      body_template?: string;
+      headers?: Record<string, string>;
+      accepted_status?: number[];
+    }[];
   };
 };
 
@@ -315,7 +365,7 @@ export type ServerBackup = {
   created_by: string | null;
   created_at: string;
   completed_at: string | null;
-  discord_delivery?: {
+  discord_deliveries?: {
     id: string;
     destination_id: string;
     destination_name: string;
@@ -325,7 +375,7 @@ export type ServerBackup = {
     response_status: number | null;
     last_error: string | null;
     delivered_at: string | null;
-  };
+  }[];
 };
 
 export type ServerScheduleTask = {
@@ -359,11 +409,25 @@ export type ServerWebhook = {
   kind: "discord" | "generic";
   url_preview: string;
   enabled: boolean;
+  deliver_events: boolean;
+  deliver_backups: boolean;
   event_filters: string[];
   has_signing_secret: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type WebhookDelivery = {
+  id: string;
+  destination_id: string;
+  status: "queued" | "delivering" | "succeeded" | "retrying" | "dead";
+  attempts: number;
+  response_status?: number;
+  last_error?: string;
+  next_attempt_at?: string;
+  created_at: string;
+  delivered_at?: string;
 };
 
 export type ServerDatabase = {
@@ -430,7 +494,6 @@ export type ServerSummary = {
     started_at: string | null;
     exit_code: number | null;
     last_error: string | null;
-    command_ready: boolean;
     observed_at: string;
   };
   created_at: string;

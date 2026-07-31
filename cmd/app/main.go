@@ -16,6 +16,7 @@ import (
 	"github.com/dockside-gg/game-panel/internal/healthcheck"
 	"github.com/dockside-gg/game-panel/internal/httpapi"
 	"github.com/dockside-gg/game-panel/internal/logging"
+	"github.com/dockside-gg/game-panel/internal/secure"
 	"github.com/dockside-gg/game-panel/internal/store"
 	"github.com/dockside-gg/game-panel/internal/templates"
 )
@@ -43,27 +44,51 @@ func main() {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
-	templateCount, err := templates.Seed(rootCtx, pool)
+	bundledCount, err := templates.Seed(rootCtx, pool)
 	if err != nil {
-		logger.Error("embedded template catalog initialization failed", "error", err)
+		logger.Error("bundled template catalog initialization failed", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("embedded template catalog ready", "templates", templateCount)
+	logger.Info("bundled compatibility templates ready", "templates", bundledCount)
+	catalog := templates.NewCatalogSyncer(pool, cfg.TemplateCatalogURL, logger)
+	go func() {
+		catalogStatus, syncErr := catalog.Sync(rootCtx)
+		if syncErr != nil {
+			logger.Warn(
+				"Dockside template catalog is temporarily unavailable; bundled and local templates remain ready",
+				"error", syncErr,
+			)
+		} else {
+			logger.Info(
+				"Dockside template catalog ready",
+				"version", catalogStatus.CatalogVersion,
+				"templates", catalogStatus.TemplateCount,
+			)
+		}
+		catalog.Run(rootCtx, cfg.TemplateSyncEvery)
+	}()
 	dataStore := store.New(pool)
+	box, err := secure.NewBox(cfg.EncryptionKey)
+	if err != nil {
+		logger.Error("installation encryption initialization failed", "error", err)
+		os.Exit(1)
+	}
 	if err := dataStore.EnsureInstallation(
 		rootCtx,
 		cfg.InstanceID,
 		cfg.PublicURL.String(),
 		cfg.DiscordClientID,
+		cfg.DiscordClientSecret,
 		cfg.BootstrapToken,
 		cfg.MFAPolicy,
+		box,
 	); err != nil {
 		logger.Error("installation initialization failed", "error", err)
 		os.Exit(1)
 	}
 
 	engine := engineclient.New(cfg.EngineURL, cfg.EngineToken)
-	api, err := httpapi.New(cfg, dataStore, pool, engine, logger)
+	api, err := httpapi.New(cfg, dataStore, pool, engine, catalog, logger)
 	if err != nil {
 		logger.Error("http api initialization failed", "error", err)
 		os.Exit(1)

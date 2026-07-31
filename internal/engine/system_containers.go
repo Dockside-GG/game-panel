@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +15,9 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/dockside-gg/game-panel/internal/engineclient"
+	"github.com/go-chi/chi/v5"
 )
 
 var allowedSystemComponents = map[string]bool{
@@ -22,6 +26,64 @@ var allowedSystemComponents = map[string]bool{
 	"worker":   true,
 	"engine":   true,
 	"postgres": true,
+}
+
+func (s *Server) systemContainerLogs(w http.ResponseWriter, r *http.Request) {
+	component := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "component")))
+	if !allowedSystemComponents[component] {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "system component not found"})
+		return
+	}
+	tail := 250
+	if value := strings.TrimSpace(r.URL.Query().Get("tail")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 20 || parsed > 2000 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tail must be 20-2000"})
+			return
+		}
+		tail = parsed
+	}
+	managed, err := s.listSystemContainers(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "could not list system containers"})
+		return
+	}
+	containerID := ""
+	for _, summary := range managed {
+		if summary.Labels["gg.dockside.component"] == component {
+			if containerID != "" {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "multiple matching system containers found"})
+				return
+			}
+			containerID = summary.ID
+		}
+	}
+	if containerID == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "system container not found"})
+		return
+	}
+	logs, err := s.docker.ContainerLogs(r.Context(), containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+		Tail:       strconv.Itoa(tail),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "system container logs unavailable"})
+		return
+	}
+	defer logs.Close()
+	stdout, stderr := &strings.Builder{}, &strings.Builder{}
+	if _, err := stdcopy.StdCopy(stdout, stderr, io.LimitReader(logs, 4<<20)); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "system container logs could not be decoded"})
+		return
+	}
+	writeJSON(w, http.StatusOK, engineclient.SystemContainerLogs{
+		Component:  component,
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		ObservedAt: time.Now().UTC(),
+	})
 }
 
 func (s *Server) systemContainers(w http.ResponseWriter, r *http.Request) {

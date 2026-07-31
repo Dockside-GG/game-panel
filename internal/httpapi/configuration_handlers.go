@@ -255,6 +255,10 @@ func (s *Server) updateServerNetwork(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
 	}
+	if err := validateTemplatePortPolicy(current.TemplateNetworkPorts, ports); err != nil {
+		writeProblem(w, r, errors.Join(errBadRequest, err))
+		return
+	}
 	oldRequest := current.RuntimeRequest()
 	current.ApplyPortsCandidate(ports)
 	result, err := s.engine.Reconfigure(r.Context(), serverID, current.RuntimeRequest())

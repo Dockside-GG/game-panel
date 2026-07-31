@@ -17,7 +17,7 @@ var builtInRolePermissions = map[string][]string{
 		"server.power.start", "server.power.stop", "server.power.restart", "server.power.kill",
 		"server.console.read", "server.console.write",
 		"server.files.read", "server.files.write", "server.files.delete",
-		"server.backups.manage", "server.backups.restore",
+		"server.backups.download", "server.backups.manage", "server.backups.restore",
 		"server.schedules.manage", "server.databases.manage",
 		"server.network.manage", "server.startup.manage",
 		"server.resources.manage", "server.webhooks.manage", "server.delete",
@@ -27,7 +27,7 @@ var builtInRolePermissions = map[string][]string{
 		"server.power.start", "server.power.stop", "server.power.restart", "server.power.kill",
 		"server.console.read", "server.console.write",
 		"server.files.read", "server.files.write", "server.files.delete",
-		"server.backups.manage", "server.backups.restore",
+		"server.backups.download", "server.backups.manage", "server.backups.restore",
 		"server.schedules.manage",
 	},
 	"viewer": {

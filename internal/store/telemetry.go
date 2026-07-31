@@ -40,10 +40,8 @@ func (s *Store) SyncRuntimeStats(ctx context.Context, snapshots []engineclient.S
 		}
 		status := runtimeServerStatus(snapshot.State, desiredState, previousStatus)
 		var stopReason *string
-		commandReady := false
-		if status == "running" {
-			commandReady = true
-		} else if status == "stopped" || (status == "stopping" && desiredState == "stopped") {
+		running := status == "running"
+		if status == "stopped" || (status == "stopping" && desiredState == "stopped") {
 			reason := "requested"
 			if desiredState == "running" {
 				reason = "unexpected_exit"
@@ -61,15 +59,13 @@ func (s *Store) SyncRuntimeStats(ctx context.Context, snapshots []engineclient.S
 			    network_rx_bytes = $7, network_tx_bytes = $8,
 			    block_read_bytes = $9, block_write_bytes = $10,
 			    started_at = $11, exit_code = $12,
-			    last_error = NULLIF($13, ''), command_ready = $14,
-			    observed_at = $15
+			    last_error = NULLIF($13, ''), observed_at = $14
 			WHERE server_id = $1
 		`, snapshot.ServerID, snapshot.State, health, snapshot.CPUPercent,
 			snapshot.MemoryBytes, snapshot.MemoryLimitBytes,
 			snapshot.NetworkRXBytes, snapshot.NetworkTXBytes,
 			snapshot.BlockReadBytes, snapshot.BlockWriteBytes,
-			snapshot.StartedAt, snapshot.ExitCode, snapshot.Error, commandReady,
-			snapshot.ObservedAt,
+			snapshot.StartedAt, snapshot.ExitCode, snapshot.Error, snapshot.ObservedAt,
 		); err != nil {
 			return fmt.Errorf("update runtime stats for %s: %w", snapshot.ServerID, err)
 		}
@@ -83,7 +79,7 @@ func (s *Store) SyncRuntimeStats(ctx context.Context, snapshots []engineclient.S
 			    updated_at = now(),
 			    version = CASE WHEN status <> $2 THEN version + 1 ELSE version END
 			WHERE id = $1
-		`, snapshot.ServerID, status, snapshot.ContainerID, stopReason, commandReady); err != nil {
+		`, snapshot.ServerID, status, snapshot.ContainerID, stopReason, running); err != nil {
 			return fmt.Errorf("update observed server state for %s: %w", snapshot.ServerID, err)
 		}
 		unexpected := status == "stopped" && desiredState == "running"

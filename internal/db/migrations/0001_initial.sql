@@ -2,6 +2,7 @@ CREATE TABLE installations (
     id uuid PRIMARY KEY,
     public_url text NOT NULL,
     discord_client_id text NOT NULL,
+    discord_client_secret_encrypted text NOT NULL,
     bootstrap_token_hash text,
     owner_user_id uuid,
     mfa_policy text NOT NULL DEFAULT 'administrators'
@@ -98,10 +99,12 @@ CREATE TABLE templates (
     slug text NOT NULL UNIQUE,
     name text NOT NULL,
     category text NOT NULL,
-    source_kind text NOT NULL CHECK (source_kind IN ('pelican', 'pterodactyl', 'dockside', 'custom')),
+    source_kind text NOT NULL CHECK (source_kind IN ('pelican', 'pterodactyl', 'dockside')),
+    catalog_managed boolean NOT NULL DEFAULT false,
     upstream_url text,
     author text,
     description text,
+    derived_from_version_id uuid,
     trust_state text NOT NULL DEFAULT 'community'
         CHECK (trust_state IN ('curated', 'community', 'untrusted', 'blocked')),
     archived_at timestamptz,
@@ -116,6 +119,7 @@ CREATE TABLE template_versions (
     api_version text NOT NULL,
     source_format text NOT NULL,
     source_digest text NOT NULL,
+    catalog_version text,
     source_document jsonb NOT NULL,
     canonical_document jsonb NOT NULL,
     compatibility_report jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -125,6 +129,25 @@ CREATE TABLE template_versions (
     UNIQUE (template_id, source_digest)
 );
 
+ALTER TABLE templates
+    ADD CONSTRAINT templates_derived_from_version_fk
+    FOREIGN KEY (derived_from_version_id)
+    REFERENCES template_versions(id) ON DELETE SET NULL;
+
+CREATE TABLE template_catalog_state (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    catalog_url text NOT NULL,
+    catalog_version text,
+    etag text,
+    generated_at timestamptz,
+    checked_at timestamptz,
+    synced_at timestamptz,
+    template_count integer NOT NULL DEFAULT 0,
+    status text NOT NULL DEFAULT 'never'
+        CHECK (status IN ('never', 'syncing', 'current', 'failed')),
+    last_error text
+);
+
 CREATE TABLE servers (
     id uuid PRIMARY KEY,
     installation_id uuid NOT NULL REFERENCES installations(id) ON DELETE RESTRICT,
@@ -132,22 +155,45 @@ CREATE TABLE servers (
     name text NOT NULL,
     description text NOT NULL DEFAULT '',
     status text NOT NULL DEFAULT 'installing'
-        CHECK (status IN ('installing', 'stopped', 'starting', 'running', 'stopping', 'degraded', 'crashed', 'suspended', 'deleting', 'failed')),
+        CHECK (status IN (
+            'installing', 'stopped', 'starting', 'running', 'restarting',
+            'stopping', 'degraded', 'suspended', 'deleting', 'failed'
+        )),
     desired_state text NOT NULL DEFAULT 'stopped'
         CHECK (desired_state IN ('running', 'stopped', 'suspended', 'deleted')),
     container_id text,
     image_reference text NOT NULL,
     image_digest text,
     primary_address text,
+    startup_override text
+        CHECK (startup_override IS NULL OR length(startup_override) BETWEEN 1 AND 32768),
+    stop_reason text
+        CHECK (stop_reason IS NULL OR stop_reason IN (
+            'requested', 'clean_exit', 'unexpected_exit', 'startup_failure',
+            'health_failure', 'recovery_exhausted'
+        )),
+    auto_recovery_enabled boolean NOT NULL DEFAULT true,
+    recovery_attempts integer NOT NULL DEFAULT 0
+        CHECK (recovery_attempts BETWEEN 0 AND 5),
+    recovery_window_started_at timestamptz,
+    recovery_not_before timestamptz,
+    missing_container_observations integer NOT NULL DEFAULT 0
+        CHECK (missing_container_observations BETWEEN 0 AND 10),
+    externally_deleted_at timestamptz,
     created_by uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     deleted_at timestamptz,
-    version bigint NOT NULL DEFAULT 1,
-    UNIQUE (installation_id, name)
+    version bigint NOT NULL DEFAULT 1
 );
 CREATE INDEX servers_active_idx ON servers(installation_id, status)
     WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX servers_active_name_unique_idx
+    ON servers (installation_id, lower(name))
+    WHERE deleted_at IS NULL;
+CREATE INDEX servers_reconciliation_idx
+    ON servers(updated_at)
+    WHERE deleted_at IS NULL AND container_id IS NOT NULL;
 
 CREATE TABLE server_resources (
     server_id uuid PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
@@ -191,6 +237,7 @@ CREATE TABLE server_ports (
     container_port integer NOT NULL,
     protocol text NOT NULL CHECK (protocol IN ('tcp', 'udp')),
     purpose text,
+    environment text,
     is_primary boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (host_port BETWEEN 1 AND 65535),
@@ -213,6 +260,34 @@ CREATE TABLE server_variables (
         OR
         (NOT is_secret AND value_text IS NOT NULL AND value_encrypted IS NULL)
     )
+);
+
+CREATE TABLE server_variable_definitions (
+    server_id uuid NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    environment text NOT NULL,
+    display_name text NOT NULL,
+    description text NOT NULL DEFAULT '',
+    default_value text NOT NULL DEFAULT '',
+    user_viewable boolean NOT NULL DEFAULT true,
+    user_editable boolean NOT NULL DEFAULT true,
+    rules text NOT NULL DEFAULT '',
+    field_type text NOT NULL DEFAULT 'text',
+    secret boolean NOT NULL DEFAULT false,
+    position integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (server_id, environment),
+    CONSTRAINT server_variable_definitions_environment_check
+        CHECK (environment ~ '^[A-Z_][A-Z0-9_]{0,127}$'),
+    CONSTRAINT server_variable_definitions_field_type_check
+        CHECK (field_type IN ('text', 'number', 'boolean', 'password', 'select')),
+    CONSTRAINT server_variable_definitions_length_check
+        CHECK (
+            length(display_name) BETWEEN 1 AND 120
+            AND length(description) <= 1000
+            AND length(default_value) <= 65536
+            AND length(rules) <= 1000
+        )
 );
 
 CREATE TABLE role_bindings (
@@ -241,6 +316,18 @@ CREATE TABLE operations (
     started_at timestamptz,
     completed_at timestamptz
 );
+
+CREATE TABLE operation_log_entries (
+    sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    operation_id uuid NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+    server_id uuid NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    phase text NOT NULL,
+    stream text NOT NULL CHECK (stream IN ('system', 'stdout', 'stderr')),
+    message text NOT NULL,
+    observed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX operation_log_entries_server_sequence_idx
+    ON operation_log_entries(server_id, sequence);
 
 CREATE TABLE outbox_events (
     id uuid PRIMARY KEY,
@@ -308,35 +395,48 @@ CREATE TABLE backups (
     include_paths jsonb NOT NULL DEFAULT '[]'::jsonb,
     exclude_globs jsonb NOT NULL DEFAULT '[]'::jsonb,
     locked boolean NOT NULL DEFAULT false,
+    retention_days integer
+        CHECK (retention_days IS NULL OR retention_days BETWEEN 1 AND 3650),
+    expires_at timestamptz,
     created_by uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz
 );
+CREATE INDEX backups_expiration_idx
+    ON backups (expires_at)
+    WHERE expires_at IS NOT NULL AND locked = false;
 
-CREATE TABLE database_providers (
-    id uuid PRIMARY KEY,
-    installation_id uuid NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
-    kind text NOT NULL CHECK (kind IN ('postgres', 'mariadb')),
-    name text NOT NULL,
-    host text NOT NULL,
-    port integer NOT NULL,
-    admin_secret_encrypted text NOT NULL,
+CREATE TABLE server_database_hosts (
+    server_id uuid PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+    engine text NOT NULL DEFAULT 'postgresql' CHECK (engine IN ('postgresql')),
+    image_reference text NOT NULL,
+    admin_password_encrypted text NOT NULL,
+    container_id text,
+    volume_name text,
+    status text NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'ready', 'failed')),
+    last_error text,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (installation_id, name)
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE game_databases (
+CREATE TABLE server_databases (
     id uuid PRIMARY KEY,
     server_id uuid NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-    provider_id uuid NOT NULL REFERENCES database_providers(id) ON DELETE RESTRICT,
-    database_name text NOT NULL,
+    name text NOT NULL,
     username text NOT NULL,
     password_encrypted text NOT NULL,
+    status text NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'ready', 'failed', 'deleting')),
+    last_error text,
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz,
-    UNIQUE (provider_id, database_name),
-    UNIQUE (provider_id, username)
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (server_id, name),
+    UNIQUE (server_id, username)
 );
+CREATE INDEX server_databases_server_idx
+    ON server_databases(server_id, created_at);
 
 CREATE TABLE webhook_destinations (
     id uuid PRIMARY KEY,
@@ -346,6 +446,8 @@ CREATE TABLE webhook_destinations (
     url_encrypted text NOT NULL,
     signing_secret_encrypted text,
     enabled boolean NOT NULL DEFAULT true,
+    deliver_events boolean NOT NULL DEFAULT false,
+    deliver_backups boolean NOT NULL DEFAULT false,
     event_filters jsonb NOT NULL DEFAULT '[]'::jsonb,
     created_by uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -364,6 +466,27 @@ CREATE TABLE webhook_deliveries (
     created_at timestamptz NOT NULL DEFAULT now(),
     delivered_at timestamptz
 );
+CREATE INDEX webhook_delivery_claim_idx
+    ON webhook_deliveries(next_attempt_at, created_at)
+    WHERE status IN ('queued', 'retrying');
+
+CREATE TABLE backup_deliveries (
+    id uuid PRIMARY KEY,
+    backup_id uuid NOT NULL REFERENCES backups(id) ON DELETE CASCADE,
+    destination_id uuid NOT NULL REFERENCES webhook_destinations(id) ON DELETE CASCADE,
+    format text NOT NULL DEFAULT 'zip' CHECK (format IN ('archive', 'zip')),
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'queued', 'uploading', 'delivered', 'too_large', 'failed')),
+    attempts integer NOT NULL DEFAULT 0,
+    response_status integer,
+    last_error text,
+    delivered_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (backup_id, destination_id)
+);
+CREATE INDEX backup_deliveries_status_idx
+    ON backup_deliveries(status, updated_at);
 
 CREATE TABLE activity_events (
     id uuid PRIMARY KEY,
@@ -376,6 +499,38 @@ CREATE TABLE activity_events (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX activity_server_time_idx ON activity_events(server_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION dockside_enqueue_webhook_deliveries()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.server_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    INSERT INTO webhook_deliveries(
+        id, destination_id, event_id, status, next_attempt_at
+    )
+    SELECT
+        gen_random_uuid(), destination.id, NEW.id, 'queued', now()
+    FROM webhook_destinations AS destination
+    WHERE destination.server_id = NEW.server_id
+      AND destination.enabled = true
+      AND destination.deliver_events = true
+      AND (
+          jsonb_array_length(destination.event_filters) = 0
+          OR destination.event_filters ? NEW.event_type
+          OR destination.event_filters ? ('severity:' || NEW.severity)
+      );
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER activity_enqueue_webhooks
+AFTER INSERT ON activity_events
+FOR EACH ROW
+EXECUTE FUNCTION dockside_enqueue_webhook_deliveries();
 
 CREATE TABLE audit_events (
     id uuid PRIMARY KEY,
@@ -418,7 +573,9 @@ INSERT INTO permissions(name, description) VALUES
     ('server.files.write', 'Write files'),
     ('server.files.delete', 'Delete files'),
     ('server.backups.manage', 'Create and delete backups'),
+    ('server.backups.download', 'Download backup archives'),
     ('server.backups.restore', 'Restore backups'),
+    ('server.webhooks.manage', 'Manage webhook destinations'),
     ('server.schedules.manage', 'Manage schedules'),
     ('server.databases.manage', 'Manage databases'),
     ('server.network.manage', 'Manage networking'),

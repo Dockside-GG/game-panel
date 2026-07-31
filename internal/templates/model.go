@@ -5,10 +5,11 @@ import "encoding/json"
 const BundleFormatVersion = 1
 
 type Bundle struct {
-	FormatVersion int             `json:"format_version"`
-	GeneratedAt   string          `json:"generated_at"`
-	Sources       []BundleSource  `json:"sources"`
-	Templates     []TemplateEntry `json:"templates"`
+	FormatVersion  int             `json:"format_version"`
+	CatalogVersion string          `json:"catalog_version"`
+	GeneratedAt    string          `json:"generated_at"`
+	Sources        []BundleSource  `json:"sources"`
+	Templates      []TemplateEntry `json:"templates"`
 }
 
 type BundleSource struct {
@@ -65,14 +66,37 @@ type CommandTransport struct {
 // RESTCommandTransport is limited to an HTTP service listening inside the game
 // container network namespace. Templates cannot configure an arbitrary host.
 type RESTCommandTransport struct {
-	Method          string            `json:"method"`
-	Port            int               `json:"port"`
-	PortEnvironment string            `json:"port_environment,omitempty"`
-	Path            string            `json:"path"`
-	BodyTemplate    string            `json:"body_template,omitempty"`
-	Headers         map[string]string `json:"headers,omitempty"`
-	AcceptedStatus  []int             `json:"accepted_status,omitempty"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
+	Method          string             `json:"method,omitempty"`
+	Port            int                `json:"port"`
+	PortEnvironment string             `json:"port_environment,omitempty"`
+	Path            string             `json:"path,omitempty"`
+	BodyTemplate    string             `json:"body_template,omitempty"`
+	Headers         map[string]string  `json:"headers,omitempty"`
+	AcceptedStatus  []int              `json:"accepted_status,omitempty"`
+	TimeoutSeconds  int                `json:"timeout_seconds,omitempty"`
+	BasicAuth       *RESTBasicAuth     `json:"basic_auth,omitempty"`
+	Routes          []RESTCommandRoute `json:"routes,omitempty"`
+}
+
+// RESTBasicAuth builds an Authorization header at command execution time so a
+// template can reference a per-server secret without embedding or pre-encoding it.
+type RESTBasicAuth struct {
+	Username            string `json:"username"`
+	PasswordEnvironment string `json:"password_environment"`
+}
+
+// RESTCommandRoute selects an HTTP request by the first word entered in the
+// console. The remaining words are available to the request templates.
+type RESTCommandRoute struct {
+	Command        string            `json:"command"`
+	Aliases        []string          `json:"aliases,omitempty"`
+	Usage          string            `json:"usage,omitempty"`
+	MinArgs        int               `json:"min_args,omitempty"`
+	Method         string            `json:"method"`
+	Path           string            `json:"path"`
+	BodyTemplate   string            `json:"body_template,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	AcceptedStatus []int             `json:"accepted_status,omitempty"`
 }
 
 type BackupDefaults struct {
@@ -98,6 +122,7 @@ type NetworkPort struct {
 	Primary       bool   `json:"primary"`
 	Required      bool   `json:"required"`
 	Published     bool   `json:"published"`
+	InternalOnly  bool   `json:"internal_only"`
 	Environment   string `json:"environment,omitempty"`
 }
 

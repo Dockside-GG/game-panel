@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleStop,
   Clock3,
+  Code2,
   Copy,
   Cpu,
   Database,
@@ -72,10 +73,12 @@ import type {
   ServerPort,
   Session,
   TemplateDetail,
+  TemplateCatalogStatus,
   TemplateNetworkPort,
   TemplateSummary,
   TemplateVariable,
   CommandTransport,
+  WebhookDelivery,
 } from "./types";
 import { serverPresentation } from "./server-presentation";
 
@@ -119,15 +122,31 @@ export function TemplateLibraryPage() {
       return api<TemplateListResponse>(`/api/v1/templates?${params}`);
     },
   });
+  const catalog = useQuery({
+    queryKey: ["template-catalog"],
+    queryFn: () => api<TemplateCatalogStatus>("/api/v1/templates/catalog"),
+  });
+  const syncCatalog = useMutation({
+    mutationFn: () => api<TemplateCatalogStatus>("/api/v1/templates/catalog/sync", { method: "POST" }),
+    onSuccess: () => {
+      void catalog.refetch();
+      void facets.refetch();
+      void templates.refetch();
+    },
+  });
 
   return (
     <>
       <PageHeader
-        eyebrow="BUNDLED TEMPLATE LIBRARY"
+        eyebrow="COMMUNITY TEMPLATE LIBRARY"
         title="Templates"
-        description="Pelican and Pterodactyl-compatible templates bundled with this panel. No catalog download is required."
-        actions={canEditTemplates ? <div className="page-actions"><Link className="button primary" to="/templates/new"><Plus size={17} /> Create template</Link><button className="button secondary" onClick={() => setShowImport(true)}>Import JSON</button></div> : undefined}
+        description="Provision from the Dockside catalog, import a compatible JSON definition, or build a Dockside template in the visual editor."
+        actions={canEditTemplates ? <div className="page-actions"><button className="button ghost" disabled={syncCatalog.isPending} onClick={() => syncCatalog.mutate()}><RefreshCw size={15} /> {syncCatalog.isPending ? "Syncing…" : "Sync catalog"}</button><button className="button secondary" onClick={() => setShowImport(true)}><Upload size={15} /> Import JSON</button><Link className="button primary" to="/templates/new"><Plus size={17} /> Create template</Link></div> : undefined}
       />
+      <section className={`catalog-sync-banner ${catalog.data?.status ?? "never"}`}>
+        <div><Library size={18} /><span><strong>{catalog.data?.template_count ?? 0} Dockside catalog templates</strong><small>{catalog.data?.catalog_version ? `Catalog v${catalog.data.catalog_version}` : "Remote Dockside catalog has not synchronized"}{catalog.data?.synced_at ? ` · Synced ${formatTimestamp(catalog.data.synced_at)}` : ""}. Bundled compatibility templates remain available offline.</small></span></div>
+        {catalog.data?.last_error && <span className="form-error">{catalog.data.last_error}</span>}
+      </section>
       <section className="catalog-stats">
         <article>
           <span className="source-logo">P</span>
@@ -135,7 +154,7 @@ export function TemplateLibraryPage() {
             <strong>{facets.data?.sources.pelican ?? 321}</strong>
             <span>Pelican templates</span>
           </div>
-          <StatusBadge tone="info">Bundled</StatusBadge>
+          <StatusBadge tone="info">Compatible</StatusBadge>
         </article>
         <article>
           <span className="source-logo orange">PT</span>
@@ -143,7 +162,15 @@ export function TemplateLibraryPage() {
             <strong>{facets.data?.sources.pterodactyl ?? 300}</strong>
             <span>Pterodactyl templates</span>
           </div>
-          <StatusBadge tone="info">Bundled</StatusBadge>
+          <StatusBadge tone="info">Compatible</StatusBadge>
+        </article>
+        <article>
+          <span className="source-logo cyan">D</span>
+          <div>
+            <strong>{facets.data?.sources.dockside ?? 0}</strong>
+            <span>Dockside templates</span>
+          </div>
+          <StatusBadge tone="success">Native</StatusBadge>
         </article>
       </section>
       <section className="catalog-toolbar">
@@ -173,9 +200,10 @@ export function TemplateLibraryPage() {
           value={source}
           onChange={(event) => setSource(event.target.value)}
         >
-          <option value="">Both sources</option>
+          <option value="">All sources</option>
           <option value="pelican">Pelican</option>
           <option value="pterodactyl">Pterodactyl</option>
+          <option value="dockside">Dockside</option>
         </select>
       </section>
       {templates.isError ? (
@@ -252,7 +280,7 @@ function TemplateCard({
             ? "Pelican compatible"
             : template.source_kind === "pterodactyl"
               ? "Pterodactyl compatible"
-              : "Custom template"}
+              : template.catalog_managed ? "Dockside catalog" : "Dockside template"}
         </span>
       </div>
       <span className="template-category">{template.category}</span>
@@ -267,169 +295,24 @@ function TemplateCard({
           <Eye size={15} /> Preview
         </button>
         <Link
-          className="button secondary"
+          className="button primary template-create-server"
           to={`/servers/new?template=${template.version_id}`}
         >
-          Use template <ChevronRight size={16} />
+          Create server <ChevronRight size={16} />
         </Link>
       </div>
-      {template.source_kind === "custom" && canEdit && (
+      {template.source_kind === "dockside" && !template.catalog_managed && canEdit && (
         <button
           className="button danger wide"
           disabled={remove.isPending}
           onClick={() => {
-            const confirmation = window.prompt(`Type “${template.name}” to remove this custom template.`);
+            const confirmation = window.prompt(`Type "${template.name}" to remove this Dockside template.`);
             if (confirmation !== null) remove.mutate(confirmation);
           }}
-        ><Trash2 size={14} /> Remove custom template</button>
+        ><Trash2 size={14} /> Remove Dockside template</button>
       )}
       {remove.isError && <div className="form-error">{remove.error.message}</div>}
     </article>
-  );
-}
-
-export function TemplatePreviewDialog({
-  versionID,
-  onClose,
-}: {
-  versionID: string;
-  onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const session = useQuery({
-    queryKey: ["session"],
-    queryFn: () => api<Session>("/api/v1/session"),
-  });
-  const canEdit = session.data?.user.panel_role === "owner" ||
-    session.data?.user.panel_role === "administrator";
-  const detail = useQuery({
-    queryKey: ["template", versionID],
-    queryFn: () => api<TemplateDetail>(`/api/v1/templates/${versionID}`),
-  });
-  const [editing, setEditing] = useState(false);
-  const [category, setCategory] = useState("");
-  const [document, setDocument] = useState("");
-  const save = useMutation({
-    mutationFn: () => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(document);
-      } catch {
-        throw new Error("The template document is not valid JSON.");
-      }
-      return api<TemplateDetail>(
-        `/api/v1/templates/${versionID}/fork`,
-        {
-          method: "POST",
-          body: JSON.stringify({ category: category.trim(), document: parsed }),
-        },
-      );
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["templates"] });
-      void queryClient.invalidateQueries({ queryKey: ["template-facets"] });
-      onClose();
-    },
-  });
-  const item = detail.data;
-  return (
-    <div className="dialog-backdrop">
-      <div className="dialog template-preview-dialog" role="dialog" aria-modal="true">
-        <div className="dialog-title-row">
-          <div>
-            <span className={`template-source-pill ${item?.source_kind ?? ""}`}>
-              {item?.source_kind === "pelican"
-                ? "Pelican compatible"
-                : item?.source_kind === "pterodactyl"
-                  ? "Pterodactyl compatible"
-                  : "Dockside custom"}
-            </span>
-            <h2>{item?.name ?? "Template preview"}</h2>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close template preview">
-            <X size={18} />
-          </button>
-        </div>
-        {detail.isLoading ? (
-          <div className="wizard-loading"><span className="loader" /></div>
-        ) : detail.isError || !item ? (
-          <ErrorPanel error={detail.error} retry={() => void detail.refetch()} />
-        ) : editing ? (
-          <>
-            <label>Category<input value={category} maxLength={80} onChange={(event) => setCategory(event.target.value)} /></label>
-            <label>Compatible template JSON<textarea className="template-json-editor" value={document} spellCheck={false} onChange={(event) => setDocument(event.target.value)} /></label>
-            <div className="notice info">
-              {item.source_kind === "custom"
-                ? "Saving creates a new immutable version of this custom template."
-                : "Bundled templates remain unchanged. Saving creates a versioned Dockside custom copy."}
-            </div>
-          </>
-        ) : (
-          <div className="template-preview-content">
-            <p>{item.description || "No description supplied."}</p>
-            <dl className="detail-list">
-              <div><dt>Category</dt><dd>{item.category}</dd></div>
-              <div><dt>Version</dt><dd>v{item.version}</dd></div>
-              <div><dt>Runtime image</dt><dd className="mono">{item.canonical_document.default_image}</dd></div>
-              <div><dt>Installer image</dt><dd className="mono">{item.canonical_document.install_container || "None"}</dd></div>
-              <div><dt>Stop command</dt><dd className="mono">{item.canonical_document.stop_command || "Not declared"}</dd></div>
-            </dl>
-            <div className="template-command-preview">
-              <strong>Startup command</strong>
-              <code>{item.canonical_document.startup_command}</code>
-            </div>
-            <div className="template-variable-preview">
-              <strong>Published network defaults</strong>
-              {(item.canonical_document.network_ports ?? []).map((port, index) => (
-                <div key={`${port.environment ?? port.name}-${index}`}>
-                  <span>{port.name}{port.primary ? " · Primary" : ""}</span>
-                  <small>
-                    {port.container_port || "Installer chooses"}/{port.protocol || "protocol required"}
-                    {" · "}{port.published ? "Published" : "Internal by default"}
-                    {port.environment ? ` · ${port.environment}` : ""}
-                  </small>
-                </div>
-              ))}
-            </div>
-            <div className="template-variable-preview">
-              <strong>Variables</strong>
-              {item.canonical_document.variables.map((variable) => (
-                <div key={variable.environment}>
-                  <span>{variable.name || variable.environment}</span>
-                  <small>{variable.user_editable ? "Editable" : "Locked"} · {variable.secret ? "Secret" : variable.default_value || "No default"}</small>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {save.isError && <div className="form-error">{save.error.message}</div>}
-        <div className="dialog-actions">
-          <button className="button ghost" type="button" onClick={onClose}>Close</button>
-          {!editing && canEdit ? (
-            <button
-              className="button secondary"
-              type="button"
-              onClick={() => {
-                if (item) {
-                  setCategory(item.category);
-                  setDocument(JSON.stringify(item.source_document, null, 2));
-                }
-                setEditing(true);
-              }}
-            >
-              <Pencil size={15} /> {item?.source_kind === "custom" ? "Edit template" : "Customize template"}
-            </button>
-          ) : editing ? (
-            <>
-              <button className="button secondary" type="button" onClick={() => setEditing(false)}>Cancel edit</button>
-              <button className="button primary" type="button" disabled={save.isPending || !category.trim()} onClick={() => save.mutate()}>
-                {save.isPending ? "Saving…" : "Save new version"}
-              </button>
-            </>
-          ) : null}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -464,15 +347,17 @@ export function TemplateDetailPage() {
         description={item.description || "No description supplied by the template author."}
         actions={<div className="page-actions">
           {fromServer && <Link className="button ghost" to={`/servers/${fromServer}`}>Return to server</Link>}
-          {canEdit && <Link className="button secondary" to={`/templates/${item.version_id}/edit`}><Pencil size={15} /> {item.source_kind === "custom" ? "Edit template" : "Customize template"}</Link>}
-          <Link className="button primary" to={`/servers/new?template=${item.version_id}`}>Use template</Link>
+          <a className="button ghost" href={`/api/v1/templates/${item.version_id}/export?format=dockside`}><Download size={15} /> Export Dockside JSON</a>
+          {item.catalog_managed && item.source_kind !== "dockside" && <a className="button ghost" href={`/api/v1/templates/${item.version_id}/export?format=source`}><Download size={15} /> Export source JSON</a>}
+          {canEdit && <Link className="button secondary" to={`/templates/${item.version_id}/edit`}><Pencil size={15} /> {item.source_kind === "dockside" && !item.catalog_managed ? "Edit template" : "Customize template"}</Link>}
+          <Link className="button primary" to={`/servers/new?template=${item.version_id}`}>Create server <ChevronRight size={15} /></Link>
         </div>}
       />
       <section className="template-detail-grid">
         <article className="panel">
           <div className="panel-heading"><div><span className="eyebrow">RUNTIME</span><h2>Container and startup</h2></div></div>
           <dl className="detail-list">
-            <div><dt>Compatibility</dt><dd>{item.source_kind === "custom" ? "Dockside" : `${item.source_kind} compatible`}</dd></div>
+            <div><dt>Compatibility</dt><dd>{item.source_kind === "dockside" ? "Dockside" : `${item.source_kind} compatible`}</dd></div>
             <div><dt>Version</dt><dd>{item.version}</dd></div>
             <div><dt>Runtime image</dt><dd className="mono">{item.canonical_document.default_image}</dd></div>
             <div><dt>Installer image</dt><dd className="mono">{item.canonical_document.install_container || "None"}</dd></div>
@@ -501,7 +386,7 @@ export function TemplateDetailPage() {
           </div>
           <div className="template-variable-preview">
             <strong>Network</strong>
-            {(item.canonical_document.network_ports ?? []).map((port, index) => <div key={`${port.name}-${index}`}><span>{port.name}{port.primary ? " · Primary" : ""}</span><small>{port.container_port}/{port.protocol} · {port.environment || "No variable"}</small></div>)}
+            {(item.canonical_document.network_ports ?? []).map((port, index) => <div key={`${port.name}-${index}`}><span>{port.name}{port.primary ? " · Primary" : ""}</span><small>{port.container_port}/{port.protocol} · {port.internal_only ? "Internal only" : port.required ? "Required public" : port.published ? "Public by default" : "Private by default"} · {port.environment || "No variable"}</small></div>)}
           </div>
         </div>
       </section>
@@ -538,8 +423,156 @@ const blankTemplateDraft: TemplateEditorDraft = {
   installContainer: "alpine:3.22", installEntrypoint: "sh", installScript: "# Install game files into /mnt/server",
   transport: { type: "stdin" }, backupIncludes: "", backupExcludes: "logs/\n*.log",
   retention: "", cpu: "", memory: "", disk: "",
-  variables: [], ports: [{ name: "Game", purpose: "Primary game traffic", container_port: 25565, protocol: "tcp", primary: true, required: true, published: true, environment: "SERVER_PORT" }],
+  variables: [], ports: [{ name: "Game", purpose: "Primary game traffic", container_port: 25565, protocol: "tcp", primary: true, required: true, published: true, internal_only: false, environment: "SERVER_PORT" }],
 };
+
+type JSONRecord = Record<string, unknown>;
+type TemplateEditorMode = "visual" | "json";
+
+function isJSONRecord(value: unknown): value is JSONRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function numericText(value: unknown, fallback = "") {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : fallback;
+}
+
+function templateDocumentFromDraft(draft: TemplateEditorDraft, baseDocument: unknown = {}): JSONRecord {
+  const base = isJSONRecord(baseDocument) ? baseDocument : {};
+  const config = isJSONRecord(base.config) ? base.config : {};
+  const dockside = isJSONRecord(base.dockside) ? base.dockside : {};
+  const scripts = isJSONRecord(base.scripts) ? base.scripts : {};
+  const installation = isJSONRecord(scripts.installation) ? scripts.installation : {};
+  const images = Object.fromEntries(
+    draft.images.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+      const [name, ...rest] = line.split("=");
+      return [(name ?? "").trim(), rest.join("=").trim()];
+    }),
+  );
+  return {
+    ...base,
+    name: draft.name.trim(),
+    author: draft.author.trim(),
+    description: draft.description.trim(),
+    docker_images: images,
+    startup: draft.startup,
+    config: { ...config, stop: draft.stop },
+    dockside: {
+      ...dockside,
+      network_ports: draft.ports,
+      command_transport: draft.transport,
+      backup_defaults: {
+        include_paths: parseRules(draft.backupIncludes),
+        exclude_globs: parseRules(draft.backupExcludes),
+        retention_days: draft.retention ? Number(draft.retention) : null,
+      },
+      resource_defaults: {
+        cpu_limit_millicores: draft.cpu ? Number(draft.cpu) : null,
+        memory_limit_mb: draft.memory ? Number(draft.memory) : null,
+        disk_alert_limit_mb: draft.disk ? Number(draft.disk) : null,
+      },
+    },
+    scripts: {
+      ...scripts,
+      installation: {
+        ...installation,
+        script: draft.installScript,
+        container: draft.installContainer,
+        entrypoint: draft.installEntrypoint,
+      },
+    },
+    variables: draft.variables.map((variable) => ({
+      name: variable.name,
+      description: variable.description,
+      env_variable: variable.environment,
+      default_value: variable.default_value,
+      user_viewable: variable.user_viewable,
+      user_editable: variable.user_editable,
+      rules: variable.rules,
+      field_type: variable.field_type,
+      secret: variable.secret,
+    })),
+  };
+}
+
+function templateDraftFromDocument(
+  value: unknown,
+  category: string,
+  fallback: TemplateEditorDraft,
+): TemplateEditorDraft {
+  if (!isJSONRecord(value)) {
+    throw new Error("The template JSON must contain one object.");
+  }
+  const images = isJSONRecord(value.docker_images)
+    ? Object.entries(value.docker_images).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    : [];
+  if (!stringValue(value.name).trim() || images.length === 0 || !stringValue(value.startup).trim()) {
+    throw new Error("The raw template needs a name, at least one Docker image, and a startup command.");
+  }
+  const config = isJSONRecord(value.config) ? value.config : {};
+  const dockside = isJSONRecord(value.dockside) ? value.dockside : {};
+  const backup = isJSONRecord(dockside.backup_defaults) ? dockside.backup_defaults : {};
+  const resources = isJSONRecord(dockside.resource_defaults) ? dockside.resource_defaults : {};
+  const scripts = isJSONRecord(value.scripts) ? value.scripts : {};
+  const installation = isJSONRecord(scripts.installation) ? scripts.installation : {};
+  const rawPorts = Array.isArray(dockside.network_ports) ? dockside.network_ports : [];
+  const ports = rawPorts.filter(isJSONRecord).map((port): TemplateNetworkPort => ({
+    name: stringValue(port.name),
+    purpose: stringValue(port.purpose),
+    container_port: typeof port.container_port === "number" ? port.container_port : 0,
+    protocol: port.protocol === "tcp" || port.protocol === "udp" ? port.protocol : "",
+    primary: port.primary === true,
+    required: port.required === true,
+    published: port.published === true,
+    internal_only: port.internal_only === true,
+    environment: stringValue(port.environment) || undefined,
+  }));
+  const rawVariables = Array.isArray(value.variables) ? value.variables : [];
+  const variables = rawVariables.filter(isJSONRecord).map((variable): TemplateVariable => ({
+    name: stringValue(variable.name),
+    description: stringValue(variable.description),
+    environment: stringValue(variable.env_variable),
+    default_value: variable.default_value === null || variable.default_value === undefined
+      ? ""
+      : String(variable.default_value),
+    user_viewable: variable.user_viewable === true,
+    user_editable: variable.user_editable === true,
+    rules: Array.isArray(variable.rules)
+      ? variable.rules.map(String).join("|")
+      : stringValue(variable.rules),
+    field_type: stringValue(variable.field_type) || undefined,
+    secret: variable.secret === true,
+  }));
+  const transport = isJSONRecord(dockside.command_transport) &&
+    typeof dockside.command_transport.type === "string"
+    ? dockside.command_transport as unknown as CommandTransport
+    : fallback.transport;
+  return {
+    name: stringValue(value.name),
+    author: stringValue(value.author, fallback.author),
+    description: stringValue(value.description),
+    category,
+    images: images.map(([name, image]) => `${name}=${image}`).join("\n"),
+    startup: stringValue(value.startup),
+    stop: stringValue(config.stop),
+    installContainer: stringValue(installation.container),
+    installEntrypoint: stringValue(installation.entrypoint, "sh"),
+    installScript: stringValue(installation.script),
+    transport,
+    backupIncludes: Array.isArray(backup.include_paths) ? backup.include_paths.map(String).join("\n") : "",
+    backupExcludes: Array.isArray(backup.exclude_globs) ? backup.exclude_globs.map(String).join("\n") : "",
+    retention: numericText(backup.retention_days),
+    cpu: numericText(resources.cpu_limit_millicores),
+    memory: numericText(resources.memory_limit_mb),
+    disk: numericText(resources.disk_alert_limit_mb),
+    variables,
+    ports: ports.length > 0 ? ports : fallback.ports,
+  };
+}
 
 export function TemplateEditorPage({ create = false }: { create?: boolean }) {
   const { versionID = "" } = useParams();
@@ -551,11 +584,15 @@ export function TemplateEditorPage({ create = false }: { create?: boolean }) {
     enabled: !create,
   });
   const [draft, setDraft] = useState<TemplateEditorDraft>(blankTemplateDraft);
+  const [editorMode, setEditorMode] = useState<TemplateEditorMode>("visual");
+  const [rawDocument, setRawDocument] = useState(() =>
+    JSON.stringify(templateDocumentFromDraft(blankTemplateDraft), null, 2),
+  );
+  const [rawError, setRawError] = useState("");
   const [loadedVersion, setLoadedVersion] = useState("");
   if (detail.data && loadedVersion !== detail.data.version_id) {
     const item = detail.data;
-    setLoadedVersion(item.version_id);
-    setDraft({
+    const loadedDraft: TemplateEditorDraft = {
       name: item.name, author: item.author || "Dockside panel owner",
       description: item.description, category: item.category,
       images: Object.entries(item.canonical_document.images).map(([name, image]) => `${name}=${image}`).join("\n"),
@@ -573,42 +610,34 @@ export function TemplateEditorPage({ create = false }: { create?: boolean }) {
       disk: item.canonical_document.resource_defaults?.disk_alert_limit_mb?.toString() || "",
       variables: item.canonical_document.variables,
       ports: item.canonical_document.network_ports,
-    });
+    };
+    setLoadedVersion(item.version_id);
+    setDraft(loadedDraft);
+    setRawDocument(JSON.stringify(templateDocumentFromDraft(loadedDraft, {
+      file_denylist: item.canonical_document.file_denylist ?? [],
+      features: item.canonical_document.features ?? [],
+    }), null, 2));
   }
   const set = <K extends keyof TemplateEditorDraft>(key: K, value: TemplateEditorDraft[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const save = useMutation({
     mutationFn: () => {
-      const images = Object.fromEntries(draft.images.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-        const [name, ...rest] = line.split("=");
-        return [(name ?? "").trim(), rest.join("=").trim()];
-      }));
-      const document = {
-        name: draft.name.trim(), author: draft.author.trim(), description: draft.description.trim(),
-        docker_images: images, startup: draft.startup, config: { stop: draft.stop },
-        dockside: {
-          network_ports: draft.ports,
-          command_transport: draft.transport,
-          backup_defaults: {
-            include_paths: parseRules(draft.backupIncludes),
-            exclude_globs: parseRules(draft.backupExcludes),
-            retention_days: draft.retention ? Number(draft.retention) : null,
-          },
-          resource_defaults: {
-            cpu_limit_millicores: draft.cpu ? Number(draft.cpu) : null,
-            memory_limit_mb: draft.memory ? Number(draft.memory) : null,
-            disk_alert_limit_mb: draft.disk ? Number(draft.disk) : null,
-          },
-        },
-        scripts: { installation: { script: draft.installScript, container: draft.installContainer, entrypoint: draft.installEntrypoint } },
-        variables: draft.variables.map((variable) => ({
-          name: variable.name, description: variable.description,
-          env_variable: variable.environment, default_value: variable.default_value,
-          user_viewable: variable.user_viewable, user_editable: variable.user_editable,
-          rules: variable.rules, field_type: variable.field_type,
-          secret: variable.secret,
-        })),
-      };
+      let document: unknown;
+      if (editorMode === "json") {
+        try {
+          document = JSON.parse(rawDocument);
+        } catch {
+          throw new Error("The template document is not valid JSON.");
+        }
+      } else {
+        let baseDocument: unknown = {};
+        try {
+          baseDocument = JSON.parse(rawDocument);
+        } catch {
+          // A stale invalid raw draft must not prevent saving the active visual form.
+        }
+        document = templateDocumentFromDraft(draft, baseDocument);
+      }
       return api<TemplateDetail>(create ? "/api/v1/templates/import" : `/api/v1/templates/${versionID}/fork`, {
         method: "POST", body: JSON.stringify({ category: draft.category.trim(), document }),
       });
@@ -624,21 +653,111 @@ export function TemplateEditorPage({ create = false }: { create?: boolean }) {
   return (
     <>
       <nav className="breadcrumbs" aria-label="Breadcrumb"><Link to="/templates">Templates</Link><ChevronRight size={13} /><span>{create ? "Create" : detail.data?.name}</span><ChevronRight size={13} /><strong>Editor</strong></nav>
-      <PageHeader eyebrow="DOCKSIDE TEMPLATE BUILDER" title={create ? "Create template" : `Edit ${detail.data?.name ?? "template"}`} description="Build a versioned provisioning template with Dockside extensions. Secret values are never embedded." />
+      <PageHeader
+        eyebrow="DOCKSIDE TEMPLATE BUILDER"
+        title={create ? "Create template" : `Edit ${detail.data?.name ?? "template"}`}
+        description="Build a versioned provisioning template with Dockside extensions. Secret values are never embedded."
+        actions={!create && detail.data ? <a className="button secondary" href={`/api/v1/templates/${detail.data.version_id}/export?format=dockside`}><Download size={15} /> Export current version</a> : undefined}
+      />
+      <div className="template-editor-toolbar">
+        <div className="template-editor-modes" role="tablist" aria-label="Template editor mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={editorMode === "visual"}
+            className={editorMode === "visual" ? "active" : ""}
+            onClick={() => {
+              if (editorMode === "json") {
+                try {
+                  setDraft(templateDraftFromDocument(JSON.parse(rawDocument), draft.category, draft));
+                  setRawError("");
+                } catch (error) {
+                  setRawError(error instanceof Error ? error.message : "The raw template could not be loaded.");
+                  return;
+                }
+              }
+              setEditorMode("visual");
+            }}
+          >
+            <Settings size={15} /> Visual editor
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={editorMode === "json"}
+            className={editorMode === "json" ? "active" : ""}
+            onClick={() => {
+              let baseDocument: unknown = {};
+              try {
+                baseDocument = JSON.parse(rawDocument);
+              } catch {
+                // Replace invalid inactive JSON with the current valid visual draft.
+              }
+              setRawDocument(JSON.stringify(templateDocumentFromDraft(draft, baseDocument), null, 2));
+              setRawError("");
+              setEditorMode("json");
+            }}
+          >
+            <Code2 size={15} /> Raw JSON
+          </button>
+        </div>
+        <span>{editorMode === "visual" ? "Guided fields for the Dockside template specification." : "Edit the complete Dockside-compatible document directly."}</span>
+      </div>
+      {editorMode === "json" ? (
+        <section className="panel configuration-form template-raw-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">ADVANCED EDITOR</span><h2>Raw template JSON</h2></div>
+            <button
+              className="button secondary compact"
+              type="button"
+              onClick={() => {
+                try {
+                  setRawDocument(JSON.stringify(JSON.parse(rawDocument), null, 2));
+                  setRawError("");
+                } catch {
+                  setRawError("The template document is not valid JSON.");
+                }
+              }}
+            >
+              <Code2 size={13} /> Format JSON
+            </button>
+          </div>
+          <p className="section-description">This complete document is validated when saved. Compatible top-level properties outside the visual form are preserved.</p>
+          <label>Category <FieldHelp text="Category is catalog metadata and is stored outside the portable template JSON document." />
+            <input value={draft.category} maxLength={80} onChange={(event) => set("category", event.target.value)} />
+          </label>
+          <label>Dockside-compatible JSON
+            <textarea
+              className="template-json-editor template-json-editor-full"
+              value={rawDocument}
+              spellCheck={false}
+              onChange={(event) => {
+                setRawDocument(event.target.value);
+                setRawError("");
+              }}
+            />
+          </label>
+          {rawError && <div className="form-error">{rawError}</div>}
+          <div className="notice info">
+            REST command transports call <span className="mono">127.0.0.1</span> inside the game container. They do not require a host-published REST port.
+          </div>
+        </section>
+      ) : (
+        <>
       <div className="template-editor-layout">
         <section className="panel configuration-form">
           <div className="panel-heading"><div><span className="eyebrow">IDENTITY</span><h2>Template details</h2></div></div>
-          <div className="form-grid two"><label>Name<input value={draft.name} onChange={(event) => set("name", event.target.value)} /></label><label>Category<input value={draft.category} onChange={(event) => set("category", event.target.value)} /></label></div>
-          <label>Author<input value={draft.author} onChange={(event) => set("author", event.target.value)} /></label>
-          <label>Description<textarea value={draft.description} onChange={(event) => set("description", event.target.value)} /></label>
-          <label>Runtime images <span className="label-hint">One Label=image reference per line.</span><textarea className="mono" value={draft.images} onChange={(event) => set("images", event.target.value)} /></label>
+          <div className="form-grid two"><label>Name <FieldHelp text="Human-readable game or software name displayed in the template library." /><input value={draft.name} onChange={(event) => set("name", event.target.value)} /></label><label>Category <FieldHelp text="Library grouping used for filters, such as Games, Voice Servers, or Utilities." /><input value={draft.category} onChange={(event) => set("category", event.target.value)} /></label></div>
+          <label>Author <FieldHelp text="Template maintainer or community name shown in metadata." /><input value={draft.author} onChange={(event) => set("author", event.target.value)} /></label>
+          <label>Description <FieldHelp text="Explain what the template installs and any important compatibility requirements." /><textarea value={draft.description} onChange={(event) => set("description", event.target.value)} /></label>
+          <label>Runtime images <FieldHelp text="Allowed runtime container images. The first entry becomes the default image." /><span className="label-hint">One Label=image reference per line.</span><textarea className="mono" value={draft.images} onChange={(event) => set("images", event.target.value)} /></label>
         </section>
         <section className="panel configuration-form">
           <div className="panel-heading"><div><span className="eyebrow">BOOT</span><h2>Installation and startup</h2></div></div>
-          <label>Startup command<textarea className="startup-editor" value={draft.startup} onChange={(event) => set("startup", event.target.value)} /></label>
-          <label>Stop command<input value={draft.stop} onChange={(event) => set("stop", event.target.value)} /></label>
-          <div className="form-grid two"><label>Installer image<input value={draft.installContainer} onChange={(event) => set("installContainer", event.target.value)} /></label><label>Entrypoint<input value={draft.installEntrypoint} onChange={(event) => set("installEntrypoint", event.target.value)} /></label></div>
-          <label>Installation script<textarea className="startup-editor" value={draft.installScript} onChange={(event) => set("installScript", event.target.value)} /></label>
+          <label>Startup command <FieldHelp text="Command executed in the runtime container. Reference variables with double braces." /><textarea className="startup-editor" value={draft.startup} onChange={(event) => set("startup", event.target.value)} /></label>
+          <label>Stop command <FieldHelp text="Graceful shutdown command delivered using the configured command transport before Docker stop is used." /><input value={draft.stop} onChange={(event) => set("stop", event.target.value)} /></label>
+          <div className="form-grid two"><label>Installer image <FieldHelp text="Optional short-lived image used to populate the persistent server volume." /><input value={draft.installContainer} onChange={(event) => set("installContainer", event.target.value)} /></label><label>Entrypoint <FieldHelp text="Interpreter or executable used to run the installation script." /><input value={draft.installEntrypoint} onChange={(event) => set("installEntrypoint", event.target.value)} /></label></div>
+          <label>Installation script <FieldHelp text="Runs only in the isolated installer container and writes game files under /mnt/server." /><textarea className="startup-editor" value={draft.installScript} onChange={(event) => set("installScript", event.target.value)} /></label>
         </section>
       </div>
       <TemplateNetworkEditor ports={draft.ports} onChange={(ports) => set("ports", ports)} />
@@ -646,47 +765,241 @@ export function TemplateEditorPage({ create = false }: { create?: boolean }) {
       <div className="template-editor-layout">
         <section className="panel configuration-form">
           <div className="panel-heading"><div><span className="eyebrow">COMMANDS</span><h2>Console transport</h2></div></div>
-          <label>Transport<select value={draft.transport.type} onChange={(event) => {
+          <label>Transport <FieldHelp text="How commands typed in the panel reach the game: stdin, RCON, internal REST, automatic legacy detection, or disabled." /><select value={draft.transport.type} onChange={(event) => {
             const type = event.target.value as CommandTransport["type"];
             set("transport", type === "http_rest" ? { ...draft.transport, type, rest: draft.transport.rest ?? { method: "POST", port: 8080, path: "/command", body_template: "{\"command\":{{COMMAND_JSON}}}", timeout_seconds: 10 } } : { ...draft.transport, type });
           }}><option value="auto">Auto detect</option><option value="stdin">Standard input</option><option value="rcon">RCON</option><option value="http_rest">HTTP REST</option><option value="disabled">Disabled</option></select></label>
-          {draft.transport.type === "rcon" && <div className="form-grid two"><label>Port variable<input value={draft.transport.rcon_port_env || "RCON_PORT"} onChange={(event) => set("transport", { ...draft.transport, rcon_port_env: event.target.value })} /></label><label>Password variable<input value={draft.transport.rcon_password_env || "ADMIN_PASSWORD"} onChange={(event) => set("transport", { ...draft.transport, rcon_password_env: event.target.value })} /></label></div>}
+          {draft.transport.type === "rcon" && <div className="form-grid two"><label>Port variable <FieldHelp text="Template environment variable containing the internal RCON listener port." /><input value={draft.transport.rcon_port_env || "RCON_PORT"} onChange={(event) => set("transport", { ...draft.transport, rcon_port_env: event.target.value })} /></label><label>Password variable <FieldHelp text="Secret template environment variable containing the RCON password." /><input value={draft.transport.rcon_password_env || "ADMIN_PASSWORD"} onChange={(event) => set("transport", { ...draft.transport, rcon_password_env: event.target.value })} /></label></div>}
           {draft.transport.type === "http_rest" && <RESTTransportEditor value={draft.transport} onChange={(value) => set("transport", value)} />}
         </section>
         <section className="panel configuration-form">
           <div className="panel-heading"><div><span className="eyebrow">DEFAULTS</span><h2>Backups and resources</h2></div></div>
-          <label>Backup includes<textarea value={draft.backupIncludes} onChange={(event) => set("backupIncludes", event.target.value)} placeholder="Blank includes everything" /></label>
-          <label>Backup excludes<textarea value={draft.backupExcludes} onChange={(event) => set("backupExcludes", event.target.value)} /></label>
-          <div className="form-grid two"><label>Retention days<input type="number" value={draft.retention} onChange={(event) => set("retention", event.target.value)} placeholder="Indefinite" /></label><label>CPU millicores<input type="number" value={draft.cpu} onChange={(event) => set("cpu", event.target.value)} placeholder="Unlimited" /></label><label>Memory MB<input type="number" value={draft.memory} onChange={(event) => set("memory", event.target.value)} placeholder="Unlimited" /></label><label>Disk alert MB<input type="number" value={draft.disk} onChange={(event) => set("disk", event.target.value)} placeholder="Unlimited" /></label></div>
+          <label>Backup includes <FieldHelp text="Default relative folders or files selected when a user creates a backup. Blank includes the entire volume." /><textarea value={draft.backupIncludes} onChange={(event) => set("backupIncludes", event.target.value)} placeholder="Blank includes everything" /></label>
+          <label>Backup excludes <FieldHelp text="Default relative paths or glob patterns omitted from backups." /><textarea value={draft.backupExcludes} onChange={(event) => set("backupExcludes", event.target.value)} /></label>
+          <div className="form-grid two"><label>Retention days <FieldHelp text="Default automatic expiration. Blank keeps backups indefinitely." /><input type="number" value={draft.retention} onChange={(event) => set("retention", event.target.value)} placeholder="Indefinite" /></label><label>CPU millicores <FieldHelp text="Default CPU limit; 1000 equals one CPU core. Blank is unlimited." /><input type="number" value={draft.cpu} onChange={(event) => set("cpu", event.target.value)} placeholder="Unlimited" /></label><label>Memory MB <FieldHelp text="Default hard memory limit in MiB. Blank is unlimited." /><input type="number" value={draft.memory} onChange={(event) => set("memory", event.target.value)} placeholder="Unlimited" /></label><label>Disk alert MB <FieldHelp text="Usage alert threshold, not a filesystem quota. Blank disables the threshold." /><input type="number" value={draft.disk} onChange={(event) => set("disk", event.target.value)} placeholder="Unlimited" /></label></div>
         </section>
       </div>
+        </>
+      )}
       {save.isError && <div className="form-error">{save.error.message}</div>}
-      <div className="configuration-actions"><Link className="button ghost" to={create ? "/templates" : `/templates/${versionID}`}>Cancel</Link><button className="button primary" disabled={save.isPending || !draft.name.trim() || !draft.category.trim()} onClick={() => save.mutate()}><Save size={15} /> {save.isPending ? "Validating…" : "Save immutable version"}</button></div>
+      <div className="configuration-actions"><Link className="button ghost" to={create ? "/templates" : `/templates/${versionID}`}>Cancel</Link><button className="button primary" disabled={save.isPending || !draft.category.trim() || (editorMode === "visual" ? !draft.name.trim() : !rawDocument.trim())} onClick={() => save.mutate()}><Save size={15} /> {save.isPending ? "Validating…" : "Save immutable version"}</button></div>
     </>
   );
 }
 
 function TemplateNetworkEditor({ ports, onChange }: { ports: TemplateNetworkPort[]; onChange: (ports: TemplateNetworkPort[]) => void }) {
   const update = (index: number, value: Partial<TemplateNetworkPort>) => onChange(ports.map((port, candidate) => candidate === index ? { ...port, ...value } : port));
-  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">NETWORK</span><h2>Container allocations</h2></div><button className="button secondary compact" onClick={() => onChange([...ports, { name: "Additional", purpose: "Additional game traffic", container_port: 25566, protocol: "tcp", primary: false, required: false, published: true, environment: "" }])}><Plus size={13} /> Add port</button></div><div className="template-port-list">{ports.map((port, index) => <article className="template-editor-row" key={index}><label>Name<input value={port.name} onChange={(event) => update(index, { name: event.target.value })} /></label><label>Container port<input type="number" value={port.container_port} onChange={(event) => update(index, { container_port: Number(event.target.value) })} /></label><label>Protocol<select value={port.protocol} onChange={(event) => update(index, { protocol: event.target.value as "tcp" | "udp" })}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label>Variable<input value={port.environment || ""} onChange={(event) => update(index, { environment: event.target.value.toUpperCase() })} /></label><label className="compact-check"><input type="checkbox" checked={port.primary} onChange={(event) => onChange(ports.map((candidate, candidateIndex) => ({ ...candidate, primary: event.target.checked && candidateIndex === index, required: event.target.checked && candidateIndex === index ? true : candidate.required })))} /><span>Primary</span></label><button className="icon-button danger" disabled={ports.length === 1 || port.primary} onClick={() => onChange(ports.filter((_, candidate) => candidate !== index))}><Trash2 size={13} /></button></article>)}</div></section>;
+  const exposure = (port: TemplateNetworkPort) => {
+    if (port.internal_only) return "internal";
+    if (port.required) return "required";
+    if (port.published) return "default";
+    return "optional";
+  };
+  const setExposure = (index: number, value: string) => {
+    switch (value) {
+      case "required":
+        update(index, { required: true, published: true, internal_only: false });
+        break;
+      case "default":
+        update(index, { required: false, published: true, internal_only: false });
+        break;
+      case "internal":
+        update(index, { required: false, published: false, internal_only: true });
+        break;
+      default:
+        update(index, { required: false, published: false, internal_only: false });
+    }
+  };
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">NETWORK</span>
+          <h2>Container allocations <FieldHelp text="Choose whether each listener must be public, is optionally public, or must remain internal to the game container. REST console transports work over localhost and normally do not need a public port." /></h2>
+        </div>
+        <button
+          className="button secondary compact"
+          type="button"
+          onClick={() => onChange([...ports, {
+            name: "Additional",
+            purpose: "Additional game traffic",
+            container_port: 25566,
+            protocol: "tcp",
+            primary: false,
+            required: false,
+            published: true,
+            internal_only: false,
+            environment: "",
+          }])}
+        >
+          <Plus size={13} /> Add port
+        </button>
+      </div>
+      <div className="template-port-list">
+        {ports.map((port, index) => (
+          <article className="template-editor-row template-network-row" key={index}>
+            <label>Name <FieldHelp text="Short label shown during provisioning and in network settings." /><input value={port.name} onChange={(event) => update(index, { name: event.target.value })} /></label>
+            <label>Purpose <FieldHelp text="Describe what uses this listener, such as game traffic, query, voice, or internal administration." /><input value={port.purpose} maxLength={120} onChange={(event) => update(index, { purpose: event.target.value })} /></label>
+            <label>Container port <FieldHelp text="Port the game process listens on inside its container." /><input type="number" min={1} max={65535} value={port.container_port} onChange={(event) => update(index, { container_port: Number(event.target.value) })} /></label>
+            <label>Protocol <FieldHelp text="Transport protocol expected by the listener. TCP and UDP allocations are independent." /><select value={port.protocol} onChange={(event) => update(index, { protocol: event.target.value as "tcp" | "udp" })}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+            <label>Variable <FieldHelp text="Optional environment variable updated with the selected container port." /><input value={port.environment || ""} onChange={(event) => update(index, { environment: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} /></label>
+            <label>Host access <FieldHelp text="Controls whether Docker publishes this listener on the host. Internal listeners remain reachable only inside the game container." />
+              <select disabled={port.primary} value={exposure(port)} onChange={(event) => setExposure(index, event.target.value)}>
+                <option value="required">Required public</option>
+                <option value="default">Optional, public by default</option>
+                <option value="optional">Optional, private by default</option>
+                <option value="internal">Internal only (never publish)</option>
+              </select>
+            </label>
+            <label className="compact-check">
+              <input
+                type="radio"
+                name="template-primary-port"
+                checked={port.primary}
+                onChange={() => onChange(ports.map((candidate, candidateIndex) => ({
+                  ...candidate,
+                  primary: candidateIndex === index,
+                  required: candidateIndex === index ? true : candidate.required,
+                  published: candidateIndex === index ? true : candidate.published,
+                  internal_only: candidateIndex === index ? false : candidate.internal_only,
+                })))}
+              />
+              <span>Primary</span>
+            </label>
+            <button className="icon-button danger" type="button" disabled={ports.length === 1 || port.primary} onClick={() => onChange(ports.filter((_, candidate) => candidate !== index))}><Trash2 size={13} /></button>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function TemplateVariableEditor({ variables, onChange }: { variables: TemplateVariable[]; onChange: (variables: TemplateVariable[]) => void }) {
   const update = (index: number, value: Partial<TemplateVariable>) => onChange(variables.map((variable, candidate) => candidate === index ? { ...variable, ...value } : variable));
-  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">ENVIRONMENT</span><h2>Template variables</h2></div><button className="button secondary compact" onClick={() => onChange([...variables, { name: "New variable", description: "", environment: "NEW_VARIABLE", default_value: "", user_viewable: true, user_editable: true, rules: "nullable|string", field_type: "text", secret: false }])}><Plus size={13} /> Add variable</button></div><div className="template-variable-editor">{variables.map((variable, index) => <article className="template-editor-row variable" key={`${variable.environment}-${index}`}><label>Name<input value={variable.name} onChange={(event) => update(index, { name: event.target.value })} /></label><label>Environment<input value={variable.environment} onChange={(event) => update(index, { environment: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} /></label><label>Default<input type={variable.secret ? "password" : "text"} value={variable.default_value} onChange={(event) => update(index, { default_value: event.target.value })} /></label><label>Rules<input value={variable.rules || ""} onChange={(event) => update(index, { rules: event.target.value })} /></label><label className="compact-check"><input type="checkbox" checked={variable.user_editable} onChange={(event) => update(index, { user_editable: event.target.checked })} /><span>Editable</span></label><label className="compact-check"><input type="checkbox" checked={variable.secret} onChange={(event) => update(index, { secret: event.target.checked, field_type: event.target.checked ? "password" : variable.field_type })} /><span>Secret</span></label><button className="icon-button danger" onClick={() => onChange(variables.filter((_, candidate) => candidate !== index))}><Trash2 size={13} /></button></article>)}</div></section>;
+  return <section className="panel"><div className="panel-heading"><div><span className="eyebrow">ENVIRONMENT</span><h2>Template variables <FieldHelp text="Provisioning questions, environment values, and startup-command substitutions declared by this template." /></h2></div><button className="button secondary compact" onClick={() => onChange([...variables, { name: "New variable", description: "", environment: "NEW_VARIABLE", default_value: "", user_viewable: true, user_editable: true, rules: "nullable|string", field_type: "text", secret: false }])}><Plus size={13} /> Add variable</button></div><div className="template-variable-editor">{variables.map((variable, index) => <article className="template-editor-row variable" key={`${variable.environment}-${index}`}><label>Name <FieldHelp text="Human-readable question or setting label." /><input value={variable.name} onChange={(event) => update(index, { name: event.target.value })} /></label><label>Environment <FieldHelp text="Stable uppercase environment name used in the container and startup command." /><input value={variable.environment} onChange={(event) => update(index, { environment: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} /></label><label>Default <FieldHelp text="Initial value. Secret defaults should normally remain blank." /><input type={variable.secret ? "password" : "text"} value={variable.default_value} onChange={(event) => update(index, { default_value: event.target.value })} /></label><label>Rules <FieldHelp text="Validation rules such as required|string|max:120 or nullable|integer|min:1." /><input value={variable.rules || ""} onChange={(event) => update(index, { rules: event.target.value })} /></label><label className="compact-check"><input type="checkbox" checked={variable.user_editable} onChange={(event) => update(index, { user_editable: event.target.checked })} /><span>Editable</span></label><label className="compact-check"><input type="checkbox" checked={variable.secret} onChange={(event) => update(index, { secret: event.target.checked, field_type: event.target.checked ? "password" : variable.field_type })} /><span>Secret</span></label><button className="icon-button danger" onClick={() => onChange(variables.filter((_, candidate) => candidate !== index))}><Trash2 size={13} /></button></article>)}</div></section>;
 }
 
 function RESTTransportEditor({ value, onChange }: { value: CommandTransport; onChange: (value: CommandTransport) => void }) {
   const rest = value.rest ?? { method: "POST", port: 8080, path: "/command", body_template: "{\"command\":{{COMMAND_JSON}}}", timeout_seconds: 10 };
   const setRest = (change: Partial<NonNullable<CommandTransport["rest"]>>) => onChange({ ...value, rest: { ...rest, ...change } });
-  return <><div className="form-grid two"><label>Method<select value={rest.method} onChange={(event) => setRest({ method: event.target.value as typeof rest.method })}>{["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => <option key={method}>{method}</option>)}</select></label><label>Internal port<input type="number" value={rest.port} onChange={(event) => setRest({ port: Number(event.target.value) })} /></label></div><label>Path<input value={rest.path} onChange={(event) => setRest({ path: event.target.value })} placeholder="/api/command" /></label><label>Body template<textarea value={rest.body_template || ""} onChange={(event) => setRest({ body_template: event.target.value })} placeholder={'{"command":{{COMMAND_JSON}}}'} /></label><p className="fine-print">Use {"{{COMMAND}}"}, {"{{COMMAND_JSON}}"}, or {"{{ENV:VARIABLE_NAME}}"}. REST requests can only reach localhost inside this game container.</p></>;
+  const routes = rest.routes ?? [];
+  const routeMode = routes.length > 0;
+  const methods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+  const updateRoute = (index: number, change: Partial<(typeof routes)[number]>) =>
+    setRest({ routes: routes.map((route, candidate) => candidate === index ? { ...route, ...change } : route) });
+  return (
+    <div className="rest-transport-editor">
+      <div className="form-grid three">
+        <label>
+          Internal port <FieldHelp text="The HTTP listener inside the game container. It does not need to be exposed on the host." />
+          <input type="number" min={1} max={65535} value={rest.port || ""} onChange={(event) => setRest({ port: Number(event.target.value) || 0 })} placeholder="Use port variable" />
+        </label>
+        <label>
+          Port variable <FieldHelp text="Optional environment variable containing the internal REST port. It can be used instead of a fixed port." />
+          <input value={rest.port_environment || ""} onChange={(event) => setRest({ port_environment: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} placeholder="REST_PORT" />
+        </label>
+        <label>
+          Timeout seconds <FieldHelp text="Maximum time the panel waits for this internal REST request before reporting a command failure." />
+          <input type="number" min={1} max={60} value={rest.timeout_seconds || 10} onChange={(event) => setRest({ timeout_seconds: Number(event.target.value) })} />
+        </label>
+      </div>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={routeMode}
+          onChange={(event) => setRest(event.target.checked ? {
+            routes: [{
+              command: "status", aliases: [], usage: "status", min_args: 0,
+              method: "GET", path: "/status", body_template: "",
+              headers: {}, accepted_status: [200],
+            }],
+          } : { routes: [], method: "POST", path: "/command", body_template: "{\"command\":{{COMMAND_JSON}}}" })}
+        />
+        <span><strong>Use named command routes</strong><small>Map commands such as status, announce, save, or shutdown to separate REST endpoints.</small></span>
+      </label>
+      <div className="rest-auth-block">
+        <div className="form-section-title">Authentication <FieldHelp text="Basic authentication is assembled inside the engine. The password is read from a secret server variable and is never saved in the template." /></div>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={Boolean(rest.basic_auth)} onChange={(event) => setRest({
+            basic_auth: event.target.checked ? { username: "admin", password_environment: "ADMIN_PASSWORD" } : undefined,
+          })} />
+          <span><strong>Use HTTP Basic authentication</strong><small>Credentials are sent only to 127.0.0.1 inside the game container.</small></span>
+        </label>
+        {rest.basic_auth && (
+          <div className="form-grid two">
+            <label>Username <FieldHelp text="Literal Basic Auth username required by the game server API." /><input value={rest.basic_auth.username} onChange={(event) => setRest({ basic_auth: { ...rest.basic_auth!, username: event.target.value } })} /></label>
+            <label>Password variable <FieldHelp text="Name of a secret template variable containing the password." /><input value={rest.basic_auth.password_environment} onChange={(event) => setRest({ basic_auth: { ...rest.basic_auth!, password_environment: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") } })} /></label>
+          </div>
+        )}
+      </div>
+      {!routeMode ? (
+        <div className="rest-request-card">
+          <div className="form-section-title">Default request <FieldHelp text="Every command entered in the console uses this request when named routes are disabled." /></div>
+          <div className="form-grid two">
+            <label>Method <FieldHelp text="HTTP method expected by the game server API." /><select value={rest.method || "POST"} onChange={(event) => setRest({ method: event.target.value as typeof rest.method })}>{methods.map((method) => <option key={method}>{method}</option>)}</select></label>
+            <label>Path <FieldHelp text="Path on the internal API. Template markers can insert the command or arguments." /><input value={rest.path || ""} onChange={(event) => setRest({ path: event.target.value })} placeholder="/api/command" /></label>
+          </div>
+          <label>Body template <FieldHelp text="Request body. Use COMMAND_JSON for safe JSON, COMMAND for plain text, or ENV markers for server variables." /><textarea className="mono" value={rest.body_template || ""} onChange={(event) => setRest({ body_template: event.target.value })} placeholder={'{"command":{{COMMAND_JSON}}}'} /></label>
+          <div className="form-grid two">
+            <label>Headers <FieldHelp text="One header per line in Name: value form. Authorization can reference a template environment marker." /><textarea className="mono" value={headerLines(rest.headers)} onChange={(event) => setRest({ headers: parseHeaderLines(event.target.value) })} placeholder="Content-Type: application/json" /></label>
+            <label>Accepted statuses <FieldHelp text="Comma-separated HTTP status codes treated as success. Blank defaults to any 2xx response." /><input value={(rest.accepted_status ?? []).join(", ")} onChange={(event) => setRest({ accepted_status: parseStatusList(event.target.value) })} placeholder="200, 204" /></label>
+          </div>
+        </div>
+      ) : (
+        <div className="rest-route-list">
+          <div className="schedule-task-heading"><strong>Command routes</strong><button type="button" className="button secondary compact" onClick={() => setRest({ routes: [...routes, { command: `command${routes.length + 1}`, aliases: [], usage: "", min_args: 0, method: "POST", path: "/command", body_template: "{\"command\":{{ARGS_JSON}}}", headers: {}, accepted_status: [200] }] })}><Plus size={14} /> Add route</button></div>
+          {routes.map((route, index) => (
+            <article className="rest-route-card" key={`${route.command}-${index}`}>
+              <div className="rest-route-heading"><strong>Route {index + 1}</strong><button type="button" className="icon-button danger" disabled={routes.length === 1} onClick={() => setRest({ routes: routes.filter((_, candidate) => candidate !== index) })} title="Remove route"><Trash2 size={14} /></button></div>
+              <div className="form-grid three">
+                <label>Command <FieldHelp text="First word a user enters in the server console to select this route." /><input value={route.command} onChange={(event) => updateRoute(index, { command: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} placeholder="announce" /></label>
+                <label>Aliases <FieldHelp text="Optional comma-separated alternative command names." /><input value={(route.aliases ?? []).join(", ")} onChange={(event) => updateRoute(index, { aliases: event.target.value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean) })} placeholder="broadcast, say" /></label>
+                <label>Minimum arguments <FieldHelp text="Reject the command before making a request unless this many arguments follow it." /><input type="number" min={0} max={32} value={route.min_args ?? 0} onChange={(event) => updateRoute(index, { min_args: Number(event.target.value) })} /></label>
+              </div>
+              <label>Usage hint <FieldHelp text="Shown to users when the command does not contain enough arguments." /><input value={route.usage || ""} onChange={(event) => updateRoute(index, { usage: event.target.value })} placeholder="announce <message>" /></label>
+              <div className="form-grid two">
+                <label>Method <FieldHelp text="HTTP method for this named route." /><select value={route.method} onChange={(event) => updateRoute(index, { method: event.target.value as typeof route.method })}>{methods.map((method) => <option key={method}>{method}</option>)}</select></label>
+                <label>Path <FieldHelp text="Internal path. ARG1, ARGS, ARGS_JSON, and ENV markers are supported." /><input value={route.path} onChange={(event) => updateRoute(index, { path: event.target.value })} placeholder="/v1/status" /></label>
+              </div>
+              <label>Body template <FieldHelp text="Per-route request body. Use JSON-safe argument markers for JSON APIs." /><textarea className="mono" value={route.body_template || ""} onChange={(event) => updateRoute(index, { body_template: event.target.value })} /></label>
+              <div className="form-grid two">
+                <label>Headers <FieldHelp text="One header per line in Name: value form." /><textarea className="mono" value={headerLines(route.headers)} onChange={(event) => updateRoute(index, { headers: parseHeaderLines(event.target.value) })} placeholder="Content-Type: application/json" /></label>
+                <label>Accepted statuses <FieldHelp text="Comma-separated success codes. Blank accepts the full 2xx range." /><input value={(route.accepted_status ?? []).join(", ")} onChange={(event) => updateRoute(index, { accepted_status: parseStatusList(event.target.value) })} placeholder="200, 204" /></label>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+      <p className="fine-print">REST is template-defined and reaches only <span className="mono">127.0.0.1</span> inside this game container. Use {"{{COMMAND}}"}, {"{{COMMAND_JSON}}"}, {"{{ARGS}}"}, {"{{ARG1}}"}, or {"{{ENV:VARIABLE_NAME}}"} markers.</p>
+    </div>
+  );
+}
+
+function headerLines(headers?: Record<string, string>) {
+  return Object.entries(headers ?? {}).map(([name, value]) => `${name}: ${value}`).join("\n");
+}
+
+function parseHeaderLines(value: string) {
+  const result: Record<string, string> = {};
+  for (const line of value.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    const name = line.slice(0, separator).trim();
+    const headerValue = line.slice(separator + 1).trim();
+    if (name) result[name] = headerValue;
+  }
+  return result;
+}
+
+function parseStatusList(value: string) {
+  return value.split(",").map((item) => Number(item.trim())).filter((item) => Number.isInteger(item) && item >= 100 && item <= 599);
 }
 
 const customTemplateExample = JSON.stringify({
   name: "My Game Server",
   author: "Dockside owner",
   description: "A custom compatible game server template.",
-  docker_images: { "Java 21": "ghcr.io/pelican-eggs/yolks:java_21" },
+  docker_images: { "Java 21": "eclipse-temurin:21-jre" },
   startup: "java -Xms128M -Xmx{{SERVER_MEMORY}}M -jar server.jar",
   config: { stop: "stop" },
   dockside: {
@@ -698,14 +1011,15 @@ const customTemplateExample = JSON.stringify({
       primary: true,
       required: true,
       published: true,
+      internal_only: false,
       environment: "SERVER_PORT",
     }],
   },
   scripts: {
     installation: {
-      script: "#!/bin/ash\ncd /mnt/server\n# Download or install game files here",
-      container: "ghcr.io/pelican-eggs/installers:alpine",
-      entrypoint: "ash",
+      script: "set -eu\ncd /mnt/server\n# Download or install game files here",
+      container: "debian:bookworm-slim",
+      entrypoint: "sh",
     },
   },
   variables: [{
@@ -752,11 +1066,30 @@ function TemplateImportDialog({ onClose }: { onClose: () => void }) {
       setParseError("The document is not valid JSON.");
     }
   }
+  async function loadFile(file: globalThis.File | undefined) {
+    if (!file) return;
+    if (file.size > 2 << 20) {
+      setParseError("Template files are limited to 2 MiB.");
+      return;
+    }
+    setDocument(await file.text());
+    setParseError("");
+  }
   return (
     <div className="dialog-backdrop">
-      <div className="dialog template-import-dialog" role="dialog" aria-modal="true">
+      <div
+        className="dialog template-import-dialog"
+        role="dialog"
+        aria-modal="true"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          void loadFile(event.dataTransfer.files[0]);
+        }}
+      >
         <h2>Import compatible template</h2>
-        <p>Paste a Pelican/Pterodactyl-compatible JSON definition. It is normalized, validated, and stored locally; the running panel does not fetch a catalog from the web.</p>
+        <p>Upload, drop, or paste a Dockside, Pelican-compatible, or Pterodactyl-compatible JSON definition. Imported definitions are normalized into a local Dockside template.</p>
+        <label className="template-file-drop"><Upload size={18} /><span>Choose a JSON file or drop it here</span><input type="file" accept=".json,application/json" onChange={(event) => void loadFile(event.target.files?.[0])} /></label>
         <label>Category<input value={category} maxLength={80} onChange={(event) => setCategory(event.target.value)} /></label>
         <label>Template JSON<textarea className="template-json-editor" value={document} spellCheck={false} onChange={(event) => setDocument(event.target.value)} /></label>
         {(parseError || importTemplate.isError) && <div className="form-error">{parseError || importTemplate.error?.message}</div>}
@@ -805,7 +1138,7 @@ export function ServersPage() {
           <EmptyState
             icon={Server}
             title="No game servers provisioned"
-            description="Choose from the bundled template library and create your first isolated server."
+            description="Choose from the synchronized template catalog and create your first isolated server."
             action={
               <Link className="button secondary" to="/servers/new">
                 Create a server
@@ -881,7 +1214,7 @@ export function NewServerPage() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search bundled templates"
+              placeholder="Search catalog templates"
             />
           </div>
           <div className="template-picker">
@@ -918,7 +1251,7 @@ export function NewServerPage() {
             <EmptyState
               icon={Library}
               title="Select a template"
-              description="Choose a definition from the bundled template library to see its provisioning questions."
+              description="Choose a definition from the synchronized template catalog to see its provisioning questions."
             />
           ) : detail.isLoading ? (
             <div className="wizard-loading"><span className="loader" /></div>
@@ -947,8 +1280,9 @@ function ProvisionForm({ template }: { template: TemplateDetail }) {
       protocol: port.protocol,
       environment: port.environment ?? "",
       primary: port.primary,
-      enabled: port.primary || port.required || port.published,
+      enabled: !port.internal_only && (port.primary || port.required || port.published),
       required: port.required,
+      internalOnly: port.internal_only,
     })),
   );
   const [memory, setMemory] = useState(template.canonical_document.resource_defaults?.memory_limit_mb?.toString() ?? "");
@@ -1027,7 +1361,7 @@ function ProvisionForm({ template }: { template: TemplateDetail }) {
       </div>
       <label>Description <input maxLength={500} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Optional note for panel users" /></label>
       <div className="form-section-title"><Network size={16} /> Template network allocations <FieldHelp text="Container ports are the ports used by the game process. Dockside assigns conflict-free host ports for players to connect to." /></div>
-      <p className="form-help">Docker publishes each enabled allocation using the selected protocol. The host port is assigned automatically and may differ from the container port.</p>
+      <p className="form-help">Docker publishes each enabled allocation using the selected protocol. Optional private ports start unchecked; internal-only listeners can never be published. REST command transports reach localhost inside the container without a host port.</p>
       <div className="template-port-list">
         {ports.map((port) => (
           <div className={`template-port-row ${port.enabled ? "" : "disabled"}`} key={port.key}>
@@ -1035,12 +1369,12 @@ function ProvisionForm({ template }: { template: TemplateDetail }) {
               <input
                 type="checkbox"
                 checked={port.enabled}
-                disabled={port.primary || port.required}
+                disabled={port.internalOnly || port.primary || port.required}
                 onChange={(event) => setPorts((current) => current.map((candidate) =>
                   candidate.key === port.key ? { ...candidate, enabled: event.target.checked } : candidate
                 ))}
               />
-              <span>{port.name || "Game port"}{port.primary ? " · Primary" : ""}</span>
+              <span>{port.name || "Game port"}{port.primary ? " · Primary" : port.internalOnly ? " · Internal only" : ""}</span>
             </label>
             <label>Container port
               <input
@@ -1073,7 +1407,7 @@ function ProvisionForm({ template }: { template: TemplateDetail }) {
               </select>
             </label>
             <small>{port.purpose}{port.environment ? ` · ${port.environment}` : ""}</small>
-            {!port.primary && (
+            {!port.primary && !port.internalOnly && (
               <button
                 type="button"
                 className="icon-button danger"
@@ -1089,7 +1423,7 @@ function ProvisionForm({ template }: { template: TemplateDetail }) {
           onClick={() => setPorts((current) => [...current, {
             key: crypto.randomUUID(), name: "Additional port", purpose: "Additional game traffic",
             containerPort: "", protocol: "", environment: "", primary: false,
-            enabled: true, required: false,
+            enabled: true, required: false, internalOnly: false,
           }])}
         ><Plus size={13} /> Add port</button>
       </div>
@@ -1152,10 +1486,24 @@ const serverTabs = [
 export function ServerDetailPage() {
   const { serverID = "", "*": tab = "" } = useParams();
   const queryClient = useQueryClient();
+  const [templateUpdateOpen, setTemplateUpdateOpen] = useState(false);
+  const [templateUpdateMode, setTemplateUpdateMode] = useState<"rebase" | "reinstall">("rebase");
   const server = useQuery({
     queryKey: ["server", serverID],
     queryFn: () => api<ServerSummary>(`/api/v1/servers/${serverID}`),
     refetchInterval: 3_000,
+  });
+  const templateUpdate = useQuery({
+    queryKey: ["server-template-update", serverID],
+    queryFn: () => api<{
+      current_version_id: string;
+      current_version: number;
+      latest_version_id: string;
+      latest_version: number;
+      template_name: string;
+      update_available: boolean;
+    }>(`/api/v1/servers/${serverID}/template-update`),
+    refetchInterval: 15_000,
   });
   const refreshPowerState = () => {
     void queryClient.invalidateQueries({ queryKey: ["server", serverID] });
@@ -1176,6 +1524,25 @@ export function ServerDetailPage() {
         body: JSON.stringify({ action: "kill" }),
       }),
     onSuccess: refreshPowerState,
+  });
+  const applyTemplateUpdate = useMutation({
+    mutationFn: () => api<{ operation_id: string; backup_id: string }>(
+      `/api/v1/servers/${serverID}/template-update`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          target_version_id: templateUpdate.data?.latest_version_id,
+          mode: templateUpdateMode,
+        }),
+      },
+    ),
+    onSuccess: () => {
+      setTemplateUpdateOpen(false);
+      refreshPowerState();
+      void templateUpdate.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["server-backups", serverID] });
+      void queryClient.invalidateQueries({ queryKey: ["server-activity", serverID] });
+    },
   });
   if (server.isLoading) return <div className="wizard-loading"><span className="loader" /></div>;
   if (server.isError || !server.data) return <ErrorPanel error={server.error} retry={() => void server.refetch()} />;
@@ -1216,6 +1583,12 @@ export function ServerDetailPage() {
       {power.isError && <div className="form-error">{power.error.message}</div>}
       {emergencyKill.isError && <div className="form-error">{emergencyKill.error.message}</div>}
       {item.runtime.last_error && <div className="notice danger"><AlertTriangle size={16} /> {item.runtime.last_error}</div>}
+      {templateUpdate.data?.update_available && (
+        <section className="template-update-banner">
+          <div><RefreshCw size={18} /><span><strong>Template update available</strong><small>{templateUpdate.data.template_name} v{templateUpdate.data.current_version} → v{templateUpdate.data.latest_version}</small></span></div>
+          <button className="button secondary" onClick={() => setTemplateUpdateOpen(true)}>Review update</button>
+        </section>
+      )}
       <nav className="server-tabs">
         {serverTabs.map(({ path, label, icon: Icon }) => (
           <NavLink key={path} end={path === ""} to={`/servers/${serverID}${path ? `/${path}` : ""}`}>
@@ -1224,6 +1597,28 @@ export function ServerDetailPage() {
         ))}
       </nav>
       <ServerTabContent server={item} tab={tab} />
+      {templateUpdateOpen && templateUpdate.data && (
+        <div className="dialog-backdrop" role="presentation">
+          <div className="dialog template-update-dialog" role="dialog" aria-modal="true">
+            <h2>Update server template</h2>
+            <p>Update {item.name} from template v{templateUpdate.data.current_version} to v{templateUpdate.data.latest_version}. Dockside creates a mandatory full backup before changing the server.</p>
+            <div className="notice warning"><AlertTriangle size={16} /> Review and download important archives from the <Link to={`/servers/${serverID}/backups`} onClick={() => setTemplateUpdateOpen(false)}>Backups tab</Link> before continuing. The automatic pre-update backup is retained in the panel.</div>
+            <label className="update-mode-option">
+              <input type="radio" name="template-update-mode" checked={templateUpdateMode === "rebase"} onChange={() => setTemplateUpdateMode("rebase")} />
+              <span><strong>Rebase configuration</strong><small>Apply new template defaults, startup, command transport, and image while preserving server variables, published ports, resources, and files.</small></span>
+            </label>
+            <label className="update-mode-option">
+              <input type="radio" name="template-update-mode" checked={templateUpdateMode === "reinstall"} onChange={() => setTemplateUpdateMode("reinstall")} />
+              <span><strong>Run updated installer</strong><small>Also run the new installer against the persistent volume. If it fails, Dockside restores the mandatory backup and previous runtime configuration.</small></span>
+            </label>
+            {applyTemplateUpdate.isError && <div className="form-error">{applyTemplateUpdate.error.message}</div>}
+            <div className="dialog-actions">
+              <button className="button ghost" onClick={() => setTemplateUpdateOpen(false)}>Cancel</button>
+              <button className="button primary" disabled={applyTemplateUpdate.isPending} onClick={() => applyTemplateUpdate.mutate()}>{applyTemplateUpdate.isPending ? "Queuing update…" : "Back up and update"}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1362,11 +1757,7 @@ function ServerBackups({ server }: { server: ServerSummary }) {
   const [includes, setIncludes] = useState("");
   const [excludes, setExcludes] = useState("logs/*\n*.log");
   const [retentionDays, setRetentionDays] = useState("");
-  const [discordWebhookID, setDiscordWebhookID] = useState("");
-  const [discordFormat, setDiscordFormat] = useState<"zip" | "archive">("zip");
   const [confirmation, setConfirmation] = useState<{ mode: "restore" | "delete"; backup: ServerBackup } | null>(null);
-  const [confirmBackup, setConfirmBackup] = useState("");
-  const [confirmServer, setConfirmServer] = useState("");
   const defaultsApplied = useRef(false);
   const configuration = useQuery({
     queryKey: ["server-configuration", server.id],
@@ -1386,16 +1777,9 @@ function ServerBackups({ server }: { server: ServerSummary }) {
     refetchInterval: (query) =>
       query.state.data?.backups.some((item) =>
         ["queued", "running", "deleting"].includes(item.status) ||
-        (item.discord_delivery && ["pending", "queued", "uploading"].includes(item.discord_delivery.status))
+        item.discord_deliveries?.some((delivery) => ["pending", "queued", "uploading"].includes(delivery.status))
       ) ? 2_000 : 10_000,
   });
-  const webhooks = useQuery({
-    queryKey: ["server-webhooks", server.id],
-    queryFn: () => api<{ webhooks: ServerWebhook[] }>(`/api/v1/servers/${server.id}/webhooks`),
-  });
-  const discordWebhooks = webhooks.data?.webhooks.filter(
-    (destination) => destination.kind === "discord" && destination.enabled,
-  ) ?? [];
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["server-backups", server.id] });
   const create = useMutation({
     mutationFn: () =>
@@ -1406,8 +1790,6 @@ function ServerBackups({ server }: { server: ServerSummary }) {
           include_paths: parseRules(includes),
           exclude_globs: parseRules(excludes),
           retention_days: retentionDays === "" ? null : Number(retentionDays),
-          discord_webhook_id: discordWebhookID || null,
-          discord_format: discordWebhookID ? discordFormat : "",
         }),
       }),
     onSuccess: () => {
@@ -1425,33 +1807,34 @@ function ServerBackups({ server }: { server: ServerSummary }) {
   });
   const restore = useMutation({
     mutationFn: (backup: ServerBackup) =>
-      api<void>(`/api/v1/servers/${server.id}/backups/${backup.id}/restore`, {
+      api<{ operation_id: string }>(`/api/v1/servers/${server.id}/backups/${backup.id}/restore`, {
         method: "POST",
-        body: JSON.stringify({
-          confirm_server_name: confirmServer,
-          confirm_backup_name: confirmBackup,
-        }),
       }),
     onSuccess: () => {
       setConfirmation(null);
-      setConfirmBackup("");
-      setConfirmServer("");
       void queryClient.invalidateQueries({ queryKey: ["server", server.id] });
+      void queryClient.invalidateQueries({ queryKey: ["server-activity", server.id] });
     },
   });
   const remove = useMutation({
     mutationFn: (backup: ServerBackup) =>
       api<void>(`/api/v1/servers/${server.id}/backups/${backup.id}`, {
         method: "DELETE",
-        body: JSON.stringify({ confirm_name: confirmBackup }),
       }),
     onSuccess: () => {
       setConfirmation(null);
-      setConfirmBackup("");
       void refresh();
     },
   });
-  const actionError = create.error || lock.error || restore.error || remove.error;
+  const retryDelivery = useMutation({
+    mutationFn: ({ backupID, deliveryID }: { backupID: string; deliveryID: string }) =>
+      api<void>(
+        `/api/v1/servers/${server.id}/backups/${backupID}/deliveries/${deliveryID}/retry`,
+        { method: "POST" },
+      ),
+    onSuccess: () => void refresh(),
+  });
+  const actionError = create.error || lock.error || restore.error || remove.error || retryDelivery.error;
   return (
     <>
       <div className="backup-layout">
@@ -1473,24 +1856,7 @@ function ServerBackups({ server }: { server: ServerSummary }) {
                 placeholder="Keep indefinitely"
               />
             </label>
-            <label>
-              Discord delivery <FieldHelp text="Optionally attach the completed archive to an enabled Discord webhook when it fits Discord's upload limit." />
-              <span className="label-hint">Optional. Discord normally accepts files up to 10 MiB; larger backups remain stored locally.</span>
-              <select value={discordWebhookID} onChange={(event) => setDiscordWebhookID(event.target.value)}>
-                <option value="">Do not send this backup</option>
-                {discordWebhooks.map((destination) => (
-                  <option value={destination.id} key={destination.id}>{destination.name}</option>
-                ))}
-              </select>
-            </label>
-            {discordWebhookID && (
-              <label>Discord attachment format
-                <select value={discordFormat} onChange={(event) => setDiscordFormat(event.target.value as "zip" | "archive")}>
-                  <option value="zip">ZIP export</option>
-                  <option value="archive">Native restore archive (.tar.gz)</option>
-                </select>
-              </label>
-            )}
+            <div className="notice info"><Webhook size={15} /> Completed backups are sent as ZIP files to every enabled Discord webhook subscribed to backups in Settings.</div>
             <button
               className="primary-button"
               disabled={
@@ -1520,20 +1886,41 @@ function ServerBackups({ server }: { server: ServerSummary }) {
                       : "Kept until manually deleted"}
                   </span>
                   {backup.sha256 && <code title={backup.sha256}>SHA-256 {backup.sha256.slice(0, 16)}…</code>}
-                  {backup.discord_delivery && (
-                    <span
-                      className={`backup-delivery ${backup.discord_delivery.status}`}
-                      title={backup.discord_delivery.last_error ?? undefined}
+                  {backup.discord_deliveries?.map((delivery) => (
+                    <div
+                      key={delivery.id}
+                      className={`backup-delivery ${delivery.status}`}
+                      title={delivery.last_error ?? undefined}
                     >
-                      Discord: {backup.discord_delivery.status.replace("_", " ")}
-                      {" · "}{backup.discord_delivery.destination_name}
-                      {" · "}{backup.discord_delivery.format === "zip" ? "ZIP" : "tar.gz"}
-                    </span>
-                  )}
+                      <span>
+                        Discord: {delivery.status.replace("_", " ")}
+                        {" · "}{delivery.destination_name}
+                        {" · ZIP"}
+                      </span>
+                      {["failed", "too_large"].includes(delivery.status) && (
+                        <button
+                          className="button ghost compact"
+                          disabled={retryDelivery.isPending}
+                          onClick={() => retryDelivery.mutate({
+                            backupID: backup.id,
+                            deliveryID: delivery.id,
+                          })}
+                        >
+                          <RefreshCw size={12} /> Retry
+                        </button>
+                      )}
+                    </div>
+                  ))}
                 </div>
                 <div className="backup-actions">
                   <button className="icon-button" disabled={!["succeeded", "failed"].includes(backup.status) || lock.isPending} onClick={() => lock.mutate({ backup, locked: !backup.locked })} title={backup.locked ? "Unlock backup" : "Lock backup"}>{backup.locked ? <UnlockKeyhole size={14} /> : <LockKeyhole size={14} />}</button>
-                  <button className="secondary-button compact" disabled={backup.status !== "succeeded" || server.status !== "stopped"} onClick={() => setConfirmation({ mode: "restore", backup })}><RotateCw size={13} /> Restore</button>
+                  {backup.status === "succeeded" && (
+                    <>
+                      <a className="icon-button" href={`/api/v1/servers/${server.id}/backups/${backup.id}/download?format=zip`} title="Download ZIP"><Download size={14} /></a>
+                      <a className="icon-button" href={`/api/v1/servers/${server.id}/backups/${backup.id}/download?format=archive`} title="Download native archive"><Archive size={14} /></a>
+                    </>
+                  )}
+                  <button className="secondary-button compact" disabled={backup.status !== "succeeded"} onClick={() => setConfirmation({ mode: "restore", backup })}><RotateCw size={13} /> Restore</button>
                   <button className="icon-button danger" disabled={backup.locked || !["succeeded", "failed"].includes(backup.status)} onClick={() => setConfirmation({ mode: "delete", backup })} title="Delete backup"><Trash2 size={14} /></button>
                 </div>
               </article>
@@ -1546,18 +1933,18 @@ function ServerBackups({ server }: { server: ServerSummary }) {
         <div className="dialog-backdrop" role="presentation">
           <div className="dialog" role="dialog" aria-modal="true">
             <h2>{confirmation.mode === "restore" ? "Restore backup" : "Delete backup"}</h2>
-            <p>{confirmation.mode === "restore" ? "Restoring replaces every file in the stopped server volume. This cannot be undone." : "This permanently removes the archive and cannot be undone."}</p>
-            <label>Type backup name<input value={confirmBackup} onChange={(event) => setConfirmBackup(event.target.value)} placeholder={confirmation.backup.name} /></label>
-            {confirmation.mode === "restore" && <label>Type server name<input value={confirmServer} onChange={(event) => setConfirmServer(event.target.value)} placeholder={server.name} /></label>}
+            <p>{confirmation.mode === "restore"
+              ? `Restoring replaces the server files with “${confirmation.backup.name}”. Dockside creates an internal rollback archive first${server.status === "running" ? ", stops the running server, and starts it again when the restore finishes" : ""}.`
+              : `Permanently delete “${confirmation.backup.name}”? This archive cannot be recovered.`}</p>
             {(restore.isError || remove.isError) && <div className="form-error">{(restore.error || remove.error)?.message}</div>}
             <div className="dialog-actions">
               <button className="secondary-button" onClick={() => setConfirmation(null)}>Cancel</button>
               <button
                 className={confirmation.mode === "delete" ? "danger-button" : "primary-button"}
-                disabled={confirmBackup !== confirmation.backup.name || (confirmation.mode === "restore" && confirmServer !== server.name) || restore.isPending || remove.isPending}
+                disabled={restore.isPending || remove.isPending}
                 onClick={() => confirmation.mode === "restore" ? restore.mutate(confirmation.backup) : remove.mutate(confirmation.backup)}
               >
-                {confirmation.mode === "restore" ? "Replace files and restore" : "Permanently delete"}
+                {confirmation.mode === "restore" ? (restore.isPending ? "Queuing restore…" : "Restore backup") : "Permanently delete"}
               </button>
             </div>
           </div>
@@ -1614,7 +2001,10 @@ function ServerFiles({ server }: { server: ServerSummary }) {
   const [directory, setDirectory] = useState(".");
   const [selected, setSelected] = useState("");
   const [edits, setEdits] = useState<Record<string, string>>({});
-  const [newName, setNewName] = useState("");
+  const [fileDialog, setFileDialog] = useState<"new-file" | "new-folder" | "rename" | null>(null);
+  const [dialogEntry, setDialogEntry] = useState<ServerFileList["entries"][number] | null>(null);
+  const [dialogName, setDialogName] = useState("");
+  const [newContent, setNewContent] = useState("");
   const [fileError, setFileError] = useState("");
   const uploadInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -1646,8 +2036,10 @@ function ServerFiles({ server }: { server: ServerSummary }) {
     onSuccess: (result) => {
       setSelected(result.path);
       setEdits((current) => ({ ...current, [result.path]: result.content }));
-      setNewName("");
       setFileError("");
+      setFileDialog(null);
+      setDialogName("");
+      setNewContent("");
       void queryClient.invalidateQueries({ queryKey: ["server-files", server.id, directory] });
       void queryClient.invalidateQueries({ queryKey: ["server-file", server.id, result.path] });
     },
@@ -1660,8 +2052,9 @@ function ServerFiles({ server }: { server: ServerSummary }) {
         body: JSON.stringify({ path }),
       }),
     onSuccess: () => {
-      setNewName("");
       setFileError("");
+      setFileDialog(null);
+      setDialogName("");
       void queryClient.invalidateQueries({ queryKey: ["server-files", server.id, directory] });
     },
     onError: (error) => setFileError(error.message),
@@ -1686,6 +2079,31 @@ function ServerFiles({ server }: { server: ServerSummary }) {
     },
     onError: (error) => setFileError(error.message),
   });
+  const rename = useMutation({
+    mutationFn: ({ path, newName }: { path: string; newName: string }) =>
+      api<{ path: string }>(`/api/v1/servers/${server.id}/files`, {
+        method: "PATCH",
+        body: JSON.stringify({ path, new_name: newName }),
+      }),
+    onSuccess: (result, request) => {
+      if (selected === request.path) {
+        setSelected(result.path);
+        setEdits((current) => {
+          const next = { ...current };
+          const value = next[request.path];
+          if (value !== undefined) next[result.path] = value;
+          delete next[request.path];
+          return next;
+        });
+      }
+      setFileDialog(null);
+      setDialogEntry(null);
+      setDialogName("");
+      setFileError("");
+      void queryClient.invalidateQueries({ queryKey: ["server-files", server.id, directory] });
+    },
+    onError: (error) => setFileError(error.message),
+  });
 
   function childPath(name: string) {
     return directory === "." ? name : `${directory}/${name}`;
@@ -1699,14 +2117,14 @@ function ServerFiles({ server }: { server: ServerSummary }) {
   }
 
   function create(kind: "file" | "directory") {
-    const name = newName.trim();
+    const name = dialogName.trim();
     if (!name) {
       setFileError("Enter a file or directory name.");
       return;
     }
     const target = childPath(name);
     if (kind === "directory") createDirectory.mutate(target);
-    else save.mutate({ path: target, value: "" });
+    else save.mutate({ path: target, value: newContent });
   }
 
   async function upload(files: Array<{ file: globalThis.File; relativePath: string }>) {
@@ -1761,7 +2179,7 @@ function ServerFiles({ server }: { server: ServerSummary }) {
     anchor.click();
   }
 
-  const busy = save.isPending || createDirectory.isPending || remove.isPending;
+  const busy = save.isPending || createDirectory.isPending || remove.isPending || rename.isPending;
   return (
     <section
       className={`panel file-manager ${dragging ? "dragging" : ""}`}
@@ -1779,9 +2197,8 @@ function ServerFiles({ server }: { server: ServerSummary }) {
           <h2>File manager</h2>
         </div>
         <div className="file-create-controls">
-          <input value={newName} onChange={(event) => setNewName(event.target.value)} maxLength={255} placeholder="config.yml" />
-          <button className="secondary-button compact" disabled={busy} onClick={() => create("file")}><FilePlus size={14} /> New file</button>
-          <button className="secondary-button compact" disabled={busy} onClick={() => create("directory")}><FolderPlus size={14} /> New folder</button>
+          <button className="secondary-button compact" disabled={busy} onClick={() => { setFileDialog("new-file"); setDialogName(""); setNewContent(""); }}><FilePlus size={14} /> New file</button>
+          <button className="secondary-button compact" disabled={busy} onClick={() => { setFileDialog("new-folder"); setDialogName(""); }}><FolderPlus size={14} /> New folder</button>
           <button className="secondary-button compact" disabled={busy} onClick={() => uploadInput.current?.click()}><Upload size={14} /> Upload files</button>
           <button className="secondary-button compact" disabled={busy} onClick={() => folderInput.current?.click()}><FolderPlus size={14} /> Upload folder</button>
           <button className="secondary-button compact" disabled={busy} onClick={() => download(directory)}><Download size={14} /> Download folder</button>
@@ -1792,7 +2209,7 @@ function ServerFiles({ server }: { server: ServerSummary }) {
       {fileError && <div className="console-error">{fileError}</div>}
       {uploadProgress.total > 0 && uploadProgress.completed < uploadProgress.total && <div className="upload-progress"><span style={{ width: `${(uploadProgress.completed / uploadProgress.total) * 100}%` }} /><small>Uploading {uploadProgress.completed} of {uploadProgress.total}</small></div>}
       {dragging && <div className="file-drop-overlay"><Upload size={28} /><strong>Drop files or folders here</strong><span>Paths are preserved under the current directory.</span></div>}
-      <div className="file-manager-layout">
+      <div className="file-manager-layout browser-only">
         <div className="file-browser">
           <div className="file-path">
             <button className="icon-button" disabled={directory === "."} onClick={() => setDirectory(parentPath())} title="Parent directory">↑</button>
@@ -1811,8 +2228,12 @@ function ServerFiles({ server }: { server: ServerSummary }) {
                   if (entry.type === "directory") {
                     setDirectory(entry.path);
                     setSelected("");
-                  } else if (entry.type === "file") {
+                  }
+                }}
+                onDoubleClick={() => {
+                  if (entry.type === "file") {
                     setSelected(entry.path);
+                    setFileError("");
                   }
                 }}
                 disabled={!["file", "directory"].includes(entry.type)}
@@ -1820,6 +2241,18 @@ function ServerFiles({ server }: { server: ServerSummary }) {
                 {entry.type === "directory" ? <Folder size={16} /> : <File size={16} />}
                 <span><strong>{entry.name}</strong><small>{entry.type === "directory" ? "Directory" : formatBytes(entry.size)}</small></span>
                 <time>{formatTimestamp(entry.modified_at)}</time>
+                <span
+                  className="file-rename"
+                  role="button"
+                  tabIndex={0}
+                  title={`Rename ${entry.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDialogEntry(entry);
+                    setDialogName(entry.name);
+                    setFileDialog("rename");
+                  }}
+                ><Pencil size={13} /></span>
                 <span
                   className="file-download"
                   role="button"
@@ -1844,27 +2277,50 @@ function ServerFiles({ server }: { server: ServerSummary }) {
             ))}
           </div>
         </div>
-        <div className="file-editor">
-          <div className="file-editor-heading">
-            <span className="mono">{selected || "Select a text file"}</span>
-            <div>
-              <button className="icon-button" disabled={!selected} onClick={() => download(selected)} title="Download"><Download size={14} /></button>
-              <button className="primary-button compact" disabled={!selected || busy || content.isLoading} onClick={() => save.mutate({ path: selected, value: editor })}><Save size={14} /> Save</button>
+      </div>
+      {selected && (
+        <div className="dialog-backdrop">
+          <div className="dialog file-editor-dialog" role="dialog" aria-modal="true">
+            <div className="dialog-title-row">
+              <div><span className="eyebrow">TEXT FILE</span><h2>{selected.split("/").at(-1)}</h2><small className="mono">{selected}</small></div>
+              <button className="icon-button" onClick={() => {
+                if (editor !== (content.data?.content ?? "") && !window.confirm("Discard unsaved file changes?")) return;
+                setSelected("");
+              }} aria-label="Close editor"><X size={17} /></button>
+            </div>
+            {content.isLoading && <div className="file-state"><span className="loader" /></div>}
+            {content.isError && <ErrorPanel error={content.error} retry={() => void content.refetch()} />}
+            {content.data && <textarea className="modal-file-editor" value={editor} onChange={(event) => setEdits((current) => ({ ...current, [selected]: event.target.value }))} spellCheck={false} aria-label={`Editing ${selected}`} />}
+            <div className="dialog-actions">
+              <button className="button ghost" onClick={() => download(selected)}><Download size={14} /> Download</button>
+              <button className="button secondary" onClick={() => {
+                const entry = listing.data?.entries.find((candidate) => candidate.path === selected);
+                if (!entry) return;
+                setDialogEntry(entry);
+                setDialogName(entry.name);
+                setFileDialog("rename");
+              }}><Pencil size={14} /> Rename</button>
+              <button className="button primary" disabled={busy || content.isLoading || !content.data} onClick={() => save.mutate({ path: selected, value: editor })}><Save size={14} /> Save file</button>
             </div>
           </div>
-          {content.isLoading && <div className="file-state"><span className="loader" /></div>}
-          {content.isError && <ErrorPanel error={content.error} retry={() => void content.refetch()} />}
-          {!selected && <EmptyState icon={Files} title="No file selected" description="Choose a text file to inspect and edit it safely." />}
-          {selected && content.data && (
-            <textarea
-              value={editor}
-              onChange={(event) => setEdits((current) => ({ ...current, [selected]: event.target.value }))}
-              spellCheck={false}
-              aria-label={`Editing ${selected}`}
-            />
-          )}
         </div>
-      </div>
+      )}
+      {fileDialog && (
+        <div className="dialog-backdrop">
+          <div className={`dialog ${fileDialog === "new-file" ? "new-file-dialog" : ""}`} role="dialog" aria-modal="true">
+            <div className="dialog-title-row"><h2>{fileDialog === "rename" ? "Rename item" : fileDialog === "new-file" ? "New file" : "New folder"}</h2><button className="icon-button" onClick={() => setFileDialog(null)}><X size={17} /></button></div>
+            <label>Name<input autoFocus value={dialogName} maxLength={255} onChange={(event) => setDialogName(event.target.value)} placeholder={fileDialog === "new-folder" ? "configs" : "config.yml"} /></label>
+            {fileDialog === "new-file" && <label>Contents<textarea className="modal-file-editor new" value={newContent} onChange={(event) => setNewContent(event.target.value)} spellCheck={false} /></label>}
+            <div className="dialog-actions">
+              <button className="button ghost" onClick={() => setFileDialog(null)}>Cancel</button>
+              <button className="button primary" disabled={busy || !dialogName.trim()} onClick={() => {
+                if (fileDialog === "rename" && dialogEntry) rename.mutate({ path: dialogEntry.path, newName: dialogName.trim() });
+                else create(fileDialog === "new-folder" ? "directory" : "file");
+              }}>{fileDialog === "rename" ? "Rename" : "Create"}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -2107,7 +2563,7 @@ function ServerStartupEditor({ server, data }: { server: ServerSummary; data: Se
           </select>
         </label>
         <label>Custom startup command <FieldHelp text="Override the template command and reference variables with double braces, for example {{SERVER_PORT}}." />
-          <span className="label-hint">Leave blank to keep the bundled template command.</span>
+          <span className="label-hint">Leave blank to keep the selected template command.</span>
           <textarea
             className="startup-editor"
             value={startupOverride}
@@ -2399,14 +2855,13 @@ function ServerSettings({ server }: { server: ServerSummary }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [webhookName, setWebhookName] = useState("Discord operations");
-  const [webhookKind, setWebhookKind] = useState<"discord" | "generic">("discord");
   const [webhookURL, setWebhookURL] = useState("");
-  const [filters, setFilters] = useState<string[]>([
-    "severity:error", "severity:warning", "server.power.restart", "server.unexpected_exit",
-  ]);
-  const [generatedSecret, setGeneratedSecret] = useState("");
   const [deleteName, setDeleteName] = useState("");
   const [showDelete, setShowDelete] = useState(false);
+  const [testDelivery, setTestDelivery] = useState<{
+    webhookID: string;
+    deliveryID: string;
+  } | null>(null);
   const destinations = useQuery({
     queryKey: ["server-webhooks", server.id],
     queryFn: () => api<{ webhooks: ServerWebhook[] }>(`/api/v1/servers/${server.id}/webhooks`),
@@ -2414,33 +2869,54 @@ function ServerSettings({ server }: { server: ServerSummary }) {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["server-webhooks", server.id] });
   const create = useMutation({
     mutationFn: () =>
-      api<{ webhook: ServerWebhook; signing_secret: string }>(`/api/v1/servers/${server.id}/webhooks`, {
+      api<{ webhook: ServerWebhook }>(`/api/v1/servers/${server.id}/webhooks`, {
         method: "POST",
         body: JSON.stringify({
           name: webhookName.trim(),
-          kind: webhookKind,
           url: webhookURL.trim(),
-          signing_secret: "",
-          event_filters: filters,
         }),
       }),
-    onSuccess: (result) => {
+    onSuccess: () => {
       setWebhookURL("");
-      setGeneratedSecret(result.signing_secret);
       void refresh();
     },
   });
-  const toggle = useMutation({
-    mutationFn: ({ destination, enabled }: { destination: ServerWebhook; enabled: boolean }) =>
+  const updateWebhook = useMutation({
+    mutationFn: ({ destination, change }: { destination: ServerWebhook; change: Partial<Pick<ServerWebhook, "enabled" | "deliver_events" | "deliver_backups" | "event_filters">> }) =>
       api<void>(`/api/v1/servers/${server.id}/webhooks/${destination.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify(change),
       }),
     onSuccess: () => void refresh(),
   });
   const test = useMutation({
     mutationFn: (destination: ServerWebhook) =>
-      api<void>(`/api/v1/servers/${server.id}/webhooks/${destination.id}/test`, { method: "POST" }),
+      api<{ delivery: WebhookDelivery }>(`/api/v1/servers/${server.id}/webhooks/${destination.id}/test`, { method: "POST" }),
+    onSuccess: (result, destination) =>
+      setTestDelivery({
+        webhookID: destination.id,
+        deliveryID: result.delivery.id,
+      }),
+  });
+  const delivery = useQuery({
+    queryKey: ["webhook-delivery", server.id, testDelivery?.webhookID, testDelivery?.deliveryID],
+    queryFn: () =>
+      api<{ delivery: WebhookDelivery }>(
+        `/api/v1/servers/${server.id}/webhooks/${testDelivery!.webhookID}/deliveries/${testDelivery!.deliveryID}`,
+      ),
+    enabled: Boolean(testDelivery),
+    refetchInterval: (query) =>
+      ["succeeded", "dead"].includes(query.state.data?.delivery.status ?? "")
+        ? false
+        : 1_500,
+  });
+  const retryDelivery = useMutation({
+    mutationFn: () =>
+      api<{ delivery: WebhookDelivery }>(
+        `/api/v1/servers/${server.id}/webhooks/${testDelivery!.webhookID}/deliveries/${testDelivery!.deliveryID}/retry`,
+        { method: "POST" },
+      ),
+    onSuccess: () => void delivery.refetch(),
   });
   const removeWebhook = useMutation({
     mutationFn: (destination: ServerWebhook) =>
@@ -2458,7 +2934,7 @@ function ServerSettings({ server }: { server: ServerSummary }) {
       navigate("/servers");
     },
   });
-  const webhookError = create.error || toggle.error || test.error || removeWebhook.error;
+  const webhookError = create.error || updateWebhook.error || test.error || removeWebhook.error;
   return (
     <>
       <ServerGeneralSettings server={server} />
@@ -2466,38 +2942,11 @@ function ServerSettings({ server }: { server: ServerSummary }) {
         <section className="panel webhook-config">
           <div className="panel-heading"><div><span className="eyebrow">EVENT DELIVERY</span><h2>New webhook</h2></div><Webhook size={18} /></div>
           <div className="webhook-form">
-            <div className="form-grid two">
-              <label>Name<input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} maxLength={120} /></label>
-              <label>Type<select value={webhookKind} onChange={(event) => setWebhookKind(event.target.value as "discord" | "generic")}><option value="discord">Discord incoming webhook</option><option value="generic">Generic signed webhook</option></select></label>
-            </div>
-            <label>HTTPS endpoint<input type="url" value={webhookURL} onChange={(event) => setWebhookURL(event.target.value)} placeholder={webhookKind === "discord" ? "https://discord.com/api/webhooks/…" : "https://events.example.com/dockside"} /></label>
-            <fieldset>
-              <legend>Deliver events</legend>
-              <div className="webhook-filter-grid">
-                {webhookEventOptions.map((option) => (
-                  <label key={option.value}>
-                    <input
-                      type="checkbox"
-                      checked={filters.includes(option.value)}
-                      onChange={(event) => setFilters((current) =>
-                        event.target.checked
-                          ? [...current, option.value]
-                          : current.filter((value) => value !== option.value)
-                      )}
-                    /> {option.label}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
+            <label>Name <FieldHelp text="A recognizable destination name shown in delivery history." /><input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} maxLength={120} /></label>
+            <label>HTTPS endpoint <FieldHelp text="Discord incoming webhook URLs are recognized automatically; all other HTTPS endpoints receive signed JSON events." /><input type="url" value={webhookURL} onChange={(event) => setWebhookURL(event.target.value)} placeholder="https://discord.com/api/webhooks/…" /></label>
             <button className="primary-button" disabled={create.isPending || !webhookName.trim() || !webhookURL.trim()} onClick={() => create.mutate()}><Webhook size={14} /> {create.isPending ? "Saving..." : "Add webhook"}</button>
             {create.isError && <div className="form-error">{create.error.message}</div>}
-            {generatedSecret && (
-              <div className="generated-secret">
-                <strong>Copy the signing secret now</strong>
-                <p>It is shown once and signs generic webhook bodies with HMAC-SHA256.</p>
-                <div><code>{generatedSecret}</code><button className="icon-button" onClick={() => void navigator.clipboard.writeText(generatedSecret)}><Copy size={13} /></button></div>
-              </div>
-            )}
+            <p className="fine-print">After adding the destination, choose whether it receives server events, backup ZIP files, or both.</p>
           </div>
         </section>
         <section className="panel">
@@ -2509,16 +2958,61 @@ function ServerSettings({ server }: { server: ServerSummary }) {
             {destinations.data?.webhooks.map((destination) => (
               <article key={destination.id}>
                 <span className={`webhook-state ${destination.enabled ? "on" : ""}`}><Webhook size={15} /></span>
-                <div><strong>{destination.name}</strong><span>{destination.kind} · {destination.url_preview}</span><small>{destination.event_filters.length ? destination.event_filters.join(", ") : "All server events"}</small></div>
+                <div className="webhook-destination-copy">
+                  <strong>{destination.name}</strong><span>{destination.kind} · {destination.url_preview}</span>
+                  <div className="webhook-subscriptions">
+                    <label className="compact-check"><input type="checkbox" checked={destination.deliver_events} onChange={(event) => updateWebhook.mutate({ destination, change: { deliver_events: event.target.checked } })} /><span>Server events</span></label>
+                    {destination.kind === "discord" && <label className="compact-check"><input type="checkbox" checked={destination.deliver_backups} onChange={(event) => updateWebhook.mutate({ destination, change: { deliver_backups: event.target.checked } })} /><span>Backup ZIPs</span></label>}
+                  </div>
+                  {destination.deliver_events && <div className="webhook-filter-grid inline">
+                    {webhookEventOptions.map((option) => <label key={option.value}><input type="checkbox" checked={destination.event_filters.includes(option.value)} onChange={(event) => {
+                      const event_filters = event.target.checked ? [...destination.event_filters, option.value] : destination.event_filters.filter((value) => value !== option.value);
+                      updateWebhook.mutate({ destination, change: { event_filters } });
+                    }} /> {option.label}</label>)}
+                  </div>}
+                  {destination.deliver_events && destination.event_filters.length === 0 && <small>All server events are delivered.</small>}
+                </div>
                 <div>
-                  <button className="secondary-button compact" onClick={() => test.mutate(destination)}>Test</button>
-                  <button className="icon-button" onClick={() => toggle.mutate({ destination, enabled: !destination.enabled })}>{destination.enabled ? <CircleStop size={13} /> : <Play size={13} />}</button>
+                  <button
+                    className="secondary-button compact"
+                    disabled={test.isPending}
+                    onClick={() => {
+                      setTestDelivery(null);
+                      test.mutate(destination);
+                    }}
+                  >
+                    {test.isPending ? "Queuing…" : "Test"}
+                  </button>
+                  <button className="icon-button" onClick={() => updateWebhook.mutate({ destination, change: { enabled: !destination.enabled } })}>{destination.enabled ? <CircleStop size={13} /> : <Play size={13} />}</button>
                   <button className="icon-button danger" onClick={() => window.confirm(`Delete webhook “${destination.name}”?`) && removeWebhook.mutate(destination)}><Trash2 size={13} /></button>
                 </div>
               </article>
             ))}
           </div>
-          {(webhookError || test.isSuccess) && <div className={webhookError ? "form-error" : "form-success"}>{webhookError ? webhookError.message : "Test event queued for delivery."}</div>}
+          {webhookError && <div className="form-error">{webhookError.message}</div>}
+          {testDelivery && delivery.data && (
+            <div className={`delivery-result ${delivery.data.delivery.status}`}>
+              <div>
+                <strong>Webhook test: {delivery.data.delivery.status}</strong>
+                <span>
+                  {delivery.data.delivery.response_status
+                    ? `HTTP ${delivery.data.delivery.response_status} · `
+                    : ""}
+                  {delivery.data.delivery.attempts} attempt{delivery.data.delivery.attempts === 1 ? "" : "s"}
+                </span>
+                {delivery.data.delivery.last_error && <code>{delivery.data.delivery.last_error}</code>}
+              </div>
+              {["dead", "retrying"].includes(delivery.data.delivery.status) && (
+                <button
+                  className="button secondary compact"
+                  disabled={retryDelivery.isPending}
+                  onClick={() => retryDelivery.mutate()}
+                >
+                  <RefreshCw size={13} /> Retry now
+                </button>
+              )}
+            </div>
+          )}
         </section>
       </div>
       <section className="panel danger-zone">
@@ -2584,8 +3078,6 @@ type DraftScheduleTask = {
   includes: string;
   excludes: string;
   retention: string;
-  discordWebhookID: string;
-  discordFormat: "zip" | "archive";
 };
 
 const cronPresets = [
@@ -2603,21 +3095,14 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   const [enabled, setEnabled] = useState(true);
   const [tasks, setTasks] = useState<DraftScheduleTask[]>([
-    { key: 1, task_type: "backup", value: "Scheduled backup", includes: "", excludes: "logs/*\n*.log", retention: "", discordWebhookID: "", discordFormat: "zip" },
-    { key: 2, task_type: "power", value: "restart", includes: "", excludes: "", retention: "", discordWebhookID: "", discordFormat: "zip" },
+    { key: 1, task_type: "backup", value: "Scheduled backup", includes: "", excludes: "logs/*\n*.log", retention: "" },
+    { key: 2, task_type: "power", value: "restart", includes: "", excludes: "", retention: "" },
   ]);
   const schedules = useQuery({
     queryKey: ["server-schedules", server.id],
     queryFn: () => api<{ schedules: ServerSchedule[] }>(`/api/v1/servers/${server.id}/schedules`),
     refetchInterval: 10_000,
   });
-  const webhooks = useQuery({
-    queryKey: ["server-webhooks", server.id],
-    queryFn: () => api<{ webhooks: ServerWebhook[] }>(`/api/v1/servers/${server.id}/webhooks`),
-  });
-  const discordWebhooks = webhooks.data?.webhooks.filter(
-    (destination) => destination.kind === "discord" && destination.enabled,
-  ) ?? [];
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["server-schedules", server.id] });
   const create = useMutation({
     mutationFn: () =>
@@ -2672,7 +3157,7 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
             <label>Timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
           </div>
           <label>Cron expression<input className="mono" value={cronExpression} onChange={(event) => setCronExpression(event.target.value)} placeholder="0 4 * * *" /></label>
-          <div className="schedule-task-heading"><strong>Ordered tasks</strong><button className="secondary-button compact" onClick={() => setTasks((current) => [...current, { key: Date.now(), task_type: "command", value: "", includes: "", excludes: "", retention: "", discordWebhookID: "", discordFormat: "zip" }])}><Plus size={13} /> Add task</button></div>
+          <div className="schedule-task-heading"><strong>Ordered tasks</strong><button className="secondary-button compact" onClick={() => setTasks((current) => [...current, { key: Date.now(), task_type: "command", value: "", includes: "", excludes: "", retention: "" }])}><Plus size={13} /> Add task</button></div>
           <div className="schedule-task-list">
             {tasks.map((task, index) => (
               <div className="schedule-task" key={task.key}>
@@ -2688,19 +3173,25 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
                 <button className="icon-button danger" disabled={tasks.length === 1} onClick={() => setTasks((current) => current.filter((item) => item.key !== task.key))}><Trash2 size={13} /></button>
                 {task.task_type === "backup" && (
                   <div className="schedule-backup-rules">
-                    <textarea value={task.includes} onChange={(event) => updateTask(task.key, { includes: event.target.value })} placeholder="Include paths (blank = all)" />
-                    <textarea value={task.excludes} onChange={(event) => updateTask(task.key, { excludes: event.target.value })} placeholder="Exclude globs" />
-                    <input type="number" min={1} max={3650} value={task.retention} onChange={(event) => updateTask(task.key, { retention: event.target.value })} placeholder="Retention days (blank = indefinitely)" />
-                    <select value={task.discordWebhookID} onChange={(event) => updateTask(task.key, { discordWebhookID: event.target.value })}>
-                      <option value="">No Discord attachment</option>
-                      {discordWebhooks.map((destination) => <option value={destination.id} key={destination.id}>{destination.name}</option>)}
-                    </select>
-                    {task.discordWebhookID && (
-                      <select value={task.discordFormat} onChange={(event) => updateTask(task.key, { discordFormat: event.target.value as "zip" | "archive" })}>
-                        <option value="zip">ZIP export</option>
-                        <option value="archive">Native tar.gz</option>
-                      </select>
-                    )}
+                    <BackupPathPicker
+                      serverID={server.id}
+                      includes={task.includes}
+                      excludes={task.excludes}
+                      onChange={(includes, excludes) => updateTask(task.key, { includes, excludes })}
+                    />
+                    <label>
+                      Retention days <FieldHelp text="Automatically remove this scheduled backup after the selected number of days. Leave blank to keep it indefinitely." />
+                      <input type="number" min={1} max={3650} value={task.retention} onChange={(event) => updateTask(task.key, { retention: event.target.value })} placeholder="Keep indefinitely" />
+                    </label>
+                    <details className="advanced-filters">
+                      <summary>Advanced path rules</summary>
+                      <p>Use these only when a glob rule cannot be expressed with the file picker.</p>
+                      <div className="form-grid two">
+                        <label>Include paths<textarea value={task.includes} onChange={(event) => updateTask(task.key, { includes: event.target.value })} placeholder="Blank includes every checked path" /></label>
+                        <label>Exclude globs<textarea value={task.excludes} onChange={(event) => updateTask(task.key, { excludes: event.target.value })} placeholder="logs/*" /></label>
+                      </div>
+                    </details>
+                    <small>Subscribed Discord webhook destinations receive the completed ZIP automatically.</small>
                   </div>
                 )}
               </div>
@@ -2746,8 +3237,6 @@ function scheduleTaskConfig(task: DraftScheduleTask) {
       include_paths: parseRules(task.includes),
       exclude_globs: parseRules(task.excludes),
       retention_days: task.retention === "" ? null : Number(task.retention),
-      discord_webhook_id: task.discordWebhookID || null,
-      discord_format: task.discordWebhookID ? task.discordFormat : "",
     };
     case "power": return { action: task.value };
     case "command": return { command: task.value.trim() };

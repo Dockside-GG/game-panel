@@ -24,12 +24,12 @@ stable release. See [Versioning and releases](docs/VERSIONING.md) and the
 - Owner-selectable Discord MFA policy and scoped viewer/operator access.
 - Docker-isolated game servers with start, stop, restart, kill, and supervised recovery.
 - Live installation/runtime console output with stdin, RCON, and template-defined HTTP REST command transports.
-- File editor, streamed file/folder uploads, folder downloads, checksummed backups/restores, backup retention, and optional Discord backup attachments.
+- Modal file editor, file/folder rename, drag-and-drop uploads, folder downloads, checksummed backups/restores, backup retention, and subscribed Discord backup delivery.
 - Cron schedules for power actions, backups, console commands, delays, and notifications.
 - Per-server startup variables, custom environment variables, ports, resource limits, webhooks, activity history, and private PostgreSQL databases.
 - Live host, system-container, and game-container CPU, memory, disk, network, block-I/O, process, and health telemetry.
-- A locally bundled library of Pelican- and Pterodactyl-compatible templates. The running panel does not download template definitions from a web catalog.
-- A Dockside visual template builder, immutable custom versions, server-to-template creation, compatible JSON import, and Dockside extensions for networking, command transports, resources, and backup defaults.
+- Bundled, offline Pelican- and Pterodactyl-compatible template snapshots, plus an independently synchronized Dockside-native catalog from [Dockside-GG/game-panel-templates](https://github.com/Dockside-GG/game-panel-templates).
+- Dockside template export/upload, a visual template builder, immutable local versions, server-to-template creation, compatible JSON import, and extensions for networking, command transports, resources, and backup defaults.
 
 ## Installation choices
 
@@ -80,13 +80,22 @@ docker compose --env-file .env -f compose.yml -f compose.dev.yml up -d --build
 
 The guided installer remains the recommended way to create development secrets and Discord settings. Select a local URL such as `http://localhost:8080` unless the development host already has a reverse proxy.
 
-Contributor commands, test setup, repository layout, migrations, frontend workflow, and troubleshooting are documented in [Developer README](docs/DEVELOPMENT.md).
+Contributor commands, test setup, repository layout, development schema workflow, frontend workflow, and troubleshooting are documented in [Developer README](docs/DEVELOPMENT.md).
 
 ## Template compatibility
 
-Dockside imports and locally bundles Pelican and Pterodactyl JSON template definitions. Dockside calls these **templates**, not eggs, throughout its UI and documentation.
+Dockside ships Pelican-compatible and Pterodactyl-compatible definitions inside
+the release as offline snapshots; the running panel does not fetch those
+definitions from their websites. The separate public Dockside catalog contains
+only original Dockside-native templates and is synchronized independently.
+Dockside calls all of these definitions **templates**, not eggs, throughout its
+UI and documentation.
 
-Compatibility is implemented by normalizing those definitions into an immutable Dockside canonical format. Dockside can then add its own optional settings without changing the bundled source definition. See [Creating Dockside templates](docs/TEMPLATES.md).
+Compatibility is implemented by normalizing every definition into an immutable
+Dockside canonical format. Bundled compatibility definitions and remote
+catalog-managed definitions remain read-only; customization creates a local
+Dockside template that synchronization never overwrites. See
+[Creating Dockside templates](docs/TEMPLATES.md).
 
 ## Architecture and technologies
 

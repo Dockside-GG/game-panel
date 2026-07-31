@@ -21,6 +21,10 @@ You need:
 - At least 4 GB RAM for the panel and a small game server; practical communities should start with 8 GB or more.
 - Free disk space for images, game files, and backups.
 - A Discord application Client ID and Client Secret.
+- Optional outbound HTTPS access to `raw.githubusercontent.com` for the
+  Dockside-native public template catalog. The panel still starts and its
+  bundled Pelican/Pterodactyl compatibility snapshots remain available when
+  that remote catalog is unavailable.
 
 Choose one access mode:
 
@@ -72,6 +76,30 @@ Dockside requests only `identify`. Do not add a bot, bot token, guild-members in
 5. For an existing reverse proxy, install only the generated `deploy\generated\nginx-dockside.conf` vhost after adding the certificate directives for that hostname.
 6. Open the printed panel URL and claim the owner account with the printed one-time bootstrap token.
 
+### Recover the bootstrap token before the first owner claim
+
+Rebuilding or redeploying the Docker services does not rotate the bootstrap
+token. Before an owner has claimed the installation, read the same token from
+the protected installation secret file:
+
+Windows PowerShell:
+
+```powershell
+Get-Content .\secrets\bootstrap_token
+```
+
+Linux:
+
+```bash
+sudo cat secrets/bootstrap_token
+```
+
+Run the command only in the installation directory and do not paste the token
+into logs, issues, or chat. Once the first owner claim succeeds, Dockside clears
+the stored token hash; the file cannot be used to claim another account. A
+disposable development installation that was claimed by the wrong account
+should be recreated with fresh secrets and a fresh database.
+
 The installer restricts the `secrets` directory ACL to the current user, local System, and Administrators.
 
 ## Linux
@@ -111,8 +139,10 @@ The metadata PostgreSQL database, engine API, per-server database services, and 
 2. Choose the owner claim flow and paste the bootstrap token.
 3. Complete Discord OAuth2.
 4. Confirm the dashboard loads.
-5. Create a disposable server from a compatible template and verify its port/firewall.
-6. In Users & Access, confirm the desired Discord MFA policy.
+5. Confirm the Templates page reports separate bundled compatibility counts and
+   the Dockside catalog status/count.
+6. Create a disposable server from a compatible template and verify its port/firewall.
+7. In Users & Access, confirm the desired Discord MFA policy.
 
 After the owner is claimed, the bootstrap token is invalid in the database even if its local secret file remains. Keep the entire `secrets` directory protected.
 

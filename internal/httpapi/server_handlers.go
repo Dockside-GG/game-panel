@@ -134,14 +134,14 @@ func (s *Server) serverCommand(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-	intentionalShutdown, err := s.store.MarkIntentionalConsoleShutdown(
-		r.Context(), serverID, input.Command,
-	)
+	commandResult, err := s.engine.Command(r.Context(), serverID, input.Command)
 	if err != nil {
 		writeProblem(w, r, err)
 		return
 	}
-	commandResult, err := s.engine.Command(r.Context(), serverID, input.Command)
+	intentionalShutdown, err := s.store.MarkIntentionalConsoleShutdown(
+		r.Context(), serverID, input.Command,
+	)
 	if err != nil {
 		writeProblem(w, r, err)
 		return
@@ -216,6 +216,10 @@ func (s *Server) createServer(w http.ResponseWriter, r *http.Request) {
 	var canonical templates.CanonicalTemplate
 	if err := json.Unmarshal(template.CanonicalDocument, &canonical); err != nil {
 		writeProblem(w, r, fmt.Errorf("decode canonical template: %w", err))
+		return
+	}
+	if err := validateTemplatePortPolicy(canonical.NetworkPorts, ports); err != nil {
+		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
 	}
 	selectedImage := strings.TrimSpace(input.Image)
@@ -308,6 +312,38 @@ func validateCreateServerPorts(input []createServerPortRequest) ([]store.ServerP
 		return nil, errors.New("exactly one published port must be primary")
 	}
 	return result, nil
+}
+
+func validateTemplatePortPolicy(definitions []templates.NetworkPort, published []store.ServerPort) error {
+	matches := func(definition templates.NetworkPort, candidate store.ServerPort) bool {
+		environment := strings.ToUpper(strings.TrimSpace(definition.Environment))
+		if environment != "" && environment == strings.ToUpper(strings.TrimSpace(candidate.Environment)) {
+			return true
+		}
+		return definition.ContainerPort > 0 &&
+			definition.Protocol != "" &&
+			definition.ContainerPort == candidate.ContainerPort &&
+			strings.EqualFold(definition.Protocol, candidate.Protocol)
+	}
+	for _, definition := range definitions {
+		found := false
+		for _, candidate := range published {
+			if !matches(definition, candidate) {
+				continue
+			}
+			if definition.InternalOnly {
+				return fmt.Errorf(
+					"template port %q is internal-only and cannot be published on the host",
+					definition.Name,
+				)
+			}
+			found = true
+		}
+		if definition.Required && !found {
+			return fmt.Errorf("required template port %q was not provided", definition.Name)
+		}
+	}
+	return nil
 }
 
 func validateTemplateVariables(definitions []templates.Variable, supplied map[string]string) ([]store.StoredVariable, error) {
