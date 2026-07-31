@@ -99,6 +99,9 @@ func (s *CatalogSyncer) Sync(ctx context.Context) (CatalogStatus, error) {
 		return s.fail(ctx, err)
 	}
 	request.Header.Set("Accept", "application/json")
+	// Catalog publishes replace content at the same stable URL. Require intermediaries to
+	// revalidate so a recently corrected catalog is not hidden by an edge cache.
+	request.Header.Set("Cache-Control", "no-cache")
 	request.Header.Set("User-Agent", "Dockside-Game-Panel/template-sync")
 	if current.CatalogURL == s.url && current.ETag != nil {
 		request.Header.Set("If-None-Match", *current.ETag)
