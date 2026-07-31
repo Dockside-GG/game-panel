@@ -2,7 +2,6 @@ package templates
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -116,9 +115,10 @@ func TestNormalizeBrandsKnownUpstreamServerNamePlaceholder(t *testing.T) {
 	}
 }
 
-func TestNormalizeUsesIPv4ForRCONLoopback(t *testing.T) {
+func TestNormalizePreservesTemplateDefinedStartupBehavior(t *testing.T) {
 	t.Parallel()
 
+	const startup = "(while read cmd; do rcon -s -a \"localhost:$RCON_PORT\" -p \"$ADMIN_PASSWORD\" \"$cmd\";done) < /dev/stdin & ./PalServer"
 	entry, err := Normalize("pterodactyl", "Games", "", json.RawMessage(`{
 		"name": "Palworld Proton",
 		"docker_images": {"Proton": "example.invalid/palworld:latest"},
@@ -128,11 +128,8 @@ func TestNormalizeUsesIPv4ForRCONLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Normalize() error = %v", err)
 	}
-	if strings.Contains(entry.CanonicalDocument.StartupCommand, "localhost:$RCON_PORT") {
-		t.Fatalf("startup command still uses localhost: %q", entry.CanonicalDocument.StartupCommand)
-	}
-	if !strings.Contains(entry.CanonicalDocument.StartupCommand, "127.0.0.1:$RCON_PORT") {
-		t.Fatalf("startup command does not use IPv4 loopback: %q", entry.CanonicalDocument.StartupCommand)
+	if entry.CanonicalDocument.StartupCommand != startup {
+		t.Fatalf("startup command was changed: %q", entry.CanonicalDocument.StartupCommand)
 	}
 }
 
@@ -182,7 +179,7 @@ func TestNormalizeDoesNotRewriteDescriptionsOrUnrelatedDefaults(t *testing.T) {
 
 func TestNormalizeUsesExplicitGenericNetworkContract(t *testing.T) {
 	t.Parallel()
-	entry, err := Normalize("custom", "Games", "", json.RawMessage(`{
+	entry, err := Normalize("dockside", "Games", "", json.RawMessage(`{
 		"name": "Example UDP Game",
 		"docker_images": {"Default": "example.invalid/game:latest"},
 		"startup": "./server --port {{GAME_PORT}} --query {{QUERY_PORT}}",
@@ -203,9 +200,73 @@ func TestNormalizeUsesExplicitGenericNetworkContract(t *testing.T) {
 	}
 }
 
+func TestNormalizeDoesNotInferNetworkingFromAStorefrontName(t *testing.T) {
+	t.Parallel()
+	entry, err := Normalize("pterodactyl", "Games", "", json.RawMessage(`{
+		"name": "Storefront-hosted example",
+		"docker_images": {"Default": "example.invalid/game:latest"},
+		"startup": "./server --distribution-port {{STEAM_PORT}}",
+		"variables": [
+			{"name":"Distribution port","env_variable":"STEAM_PORT","default_value":"27015","user_viewable":true,"user_editable":true}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var distribution *NetworkPort
+	for index := range entry.CanonicalDocument.NetworkPorts {
+		if entry.CanonicalDocument.NetworkPorts[index].Environment == "STEAM_PORT" {
+			distribution = &entry.CanonicalDocument.NetworkPorts[index]
+			break
+		}
+	}
+	if distribution == nil {
+		t.Fatal("generic port variable was not retained for provisioning")
+	}
+	if distribution.Protocol != "" || distribution.Primary {
+		t.Fatalf("storefront name influenced networking: %#v", distribution)
+	}
+}
+
+func TestNormalizeSupportsInternalOnlyNetworkPort(t *testing.T) {
+	t.Parallel()
+	entry, err := Normalize("dockside", "Games", "", json.RawMessage(`{
+		"name": "Internal REST Game",
+		"docker_images": {"Default": "example.invalid/game:latest"},
+		"startup": "./server",
+		"dockside": {"network_ports": [
+			{"name":"Game","purpose":"Primary traffic","container_port":7777,"protocol":"udp","primary":true,"required":true,"published":true,"environment":"SERVER_PORT"},
+			{"name":"REST","purpose":"Local command API","container_port":8080,"protocol":"tcp","primary":false,"required":false,"published":false,"internal_only":true,"environment":"REST_PORT"}
+		]}
+	}`))
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	port := entry.CanonicalDocument.NetworkPorts[1]
+	if !port.InternalOnly || port.Published || port.Required {
+		t.Fatalf("internal REST port = %#v", port)
+	}
+}
+
+func TestNormalizeRejectsPublishedInternalOnlyNetworkPort(t *testing.T) {
+	t.Parallel()
+	_, err := Normalize("dockside", "Games", "", json.RawMessage(`{
+		"name": "Invalid Internal Port",
+		"docker_images": {"Default": "example.invalid/game:latest"},
+		"startup": "./server",
+		"dockside": {"network_ports": [
+			{"name":"Game","purpose":"Primary traffic","container_port":7777,"protocol":"udp","primary":true,"required":true,"published":true,"environment":"SERVER_PORT"},
+			{"name":"REST","purpose":"Local command API","container_port":8080,"protocol":"tcp","primary":false,"required":false,"published":true,"internal_only":true,"environment":"REST_PORT"}
+		]}
+	}`))
+	if err == nil {
+		t.Fatal("Normalize() unexpectedly accepted an externally published internal-only port")
+	}
+}
+
 func TestNormalizeDocksideRESTAndBackupDefaults(t *testing.T) {
 	t.Parallel()
-	entry, err := Normalize("custom", "Games", "", json.RawMessage(`{
+	entry, err := Normalize("dockside", "Games", "", json.RawMessage(`{
 		"name": "REST Game",
 		"docker_images": {"Default": "example.invalid/game:latest"},
 		"startup": "./server",
@@ -242,5 +303,47 @@ func TestNormalizeDocksideRESTAndBackupDefaults(t *testing.T) {
 	if entry.CanonicalDocument.BackupDefaults.RetentionDays == nil ||
 		*entry.CanonicalDocument.BackupDefaults.RetentionDays != 14 {
 		t.Fatalf("backup defaults = %#v", entry.CanonicalDocument.BackupDefaults)
+	}
+}
+
+func TestNormalizeDocksideRESTCommandRoutes(t *testing.T) {
+	t.Parallel()
+	entry, err := Normalize("dockside", "Games", "", json.RawMessage(`{
+		"name": "Routed REST Game",
+		"docker_images": {"Default": "example.invalid/game:latest"},
+		"startup": "./server",
+		"dockside": {
+			"network_ports": [
+				{"name":"Game","purpose":"Primary traffic","container_port":7777,"protocol":"udp","primary":true,"required":true,"published":true,"environment":"SERVER_PORT"}
+			],
+			"command_transport": {
+				"type": "http_rest",
+				"rest": {
+					"port": 8212,
+					"headers": {"Content-Type":"application/json"},
+					"basic_auth": {
+						"username": "admin",
+						"password_environment": "admin_password"
+					},
+					"routes": [
+						{"command":"info","aliases":["serverinfo"],"method":"GET","path":"/v1/api/info"},
+						{"command":"announce","usage":"announce <message>","min_args":1,"method":"POST","path":"/v1/api/announce","body_template":"{\"message\":{{ARGS_JSON}}}"}
+					]
+				}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := entry.CanonicalDocument.CommandTransport.REST
+	if rest == nil || len(rest.Routes) != 2 {
+		t.Fatalf("REST routes = %#v", rest)
+	}
+	if rest.BasicAuth == nil || rest.BasicAuth.PasswordEnvironment != "ADMIN_PASSWORD" {
+		t.Fatalf("REST basic auth = %#v", rest.BasicAuth)
+	}
+	if rest.Method != "" || rest.Path != "" {
+		t.Fatalf("routed transport retained a static request: %#v", rest)
 	}
 }

@@ -36,6 +36,8 @@ type Config struct {
 	LogLevel            string
 	SessionIdle         time.Duration
 	SessionAbsolute     time.Duration
+	TemplateCatalogURL  string
+	TemplateSyncEvery   time.Duration
 }
 
 func Load(component string) (Config, error) {
@@ -54,6 +56,11 @@ func Load(component string) (Config, error) {
 		LogLevel:        envDefault("DOCKSIDE_LOG_LEVEL", "info"),
 		SessionIdle:     envDuration("DOCKSIDE_SESSION_IDLE", 8*time.Hour),
 		SessionAbsolute: envDuration("DOCKSIDE_SESSION_ABSOLUTE", 24*time.Hour),
+		TemplateCatalogURL: envDefault(
+			"DOCKSIDE_TEMPLATE_CATALOG_URL",
+			"https://raw.githubusercontent.com/Dockside-GG/game-panel-templates/main/catalog.json",
+		),
+		TemplateSyncEvery: envDuration("DOCKSIDE_TEMPLATE_SYNC_INTERVAL", 6*time.Hour),
 	}
 
 	if rawURL := strings.TrimSpace(os.Getenv("DOCKSIDE_PUBLIC_URL")); rawURL != "" {
@@ -109,6 +116,16 @@ func Load(component string) (Config, error) {
 		if cfg.MFAPolicy != "off" && cfg.MFAPolicy != "administrators" &&
 			cfg.MFAPolicy != "operators" && cfg.MFAPolicy != "everyone" {
 			return Config{}, errors.New("DOCKSIDE_MFA_POLICY must be off, administrators, operators, or everyone")
+		}
+		catalogURL, err := url.Parse(cfg.TemplateCatalogURL)
+		if err != nil || catalogURL.Host == "" || catalogURL.User != nil ||
+			catalogURL.RawQuery != "" || catalogURL.Fragment != "" ||
+			(catalogURL.Scheme != "https" &&
+				!(catalogURL.Scheme == "http" && isLoopbackHost(catalogURL.Hostname()))) {
+			return Config{}, errors.New("DOCKSIDE_TEMPLATE_CATALOG_URL must be HTTPS or loopback HTTP without credentials, query, or fragment")
+		}
+		if cfg.TemplateSyncEvery < 5*time.Minute || cfg.TemplateSyncEvery > 24*time.Hour {
+			return Config{}, errors.New("DOCKSIDE_TEMPLATE_SYNC_INTERVAL must be between 5m and 24h")
 		}
 	}
 	cfg.EngineToken, err = readSecret("DOCKSIDE_ENGINE_TOKEN", "DOCKSIDE_ENGINE_TOKEN_FILE", component == "app" || component == "worker" || component == "engine")

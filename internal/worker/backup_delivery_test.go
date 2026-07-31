@@ -7,6 +7,8 @@ import (
 	"compress/gzip"
 	"io"
 	"testing"
+
+	"github.com/dockside-gg/game-panel/internal/archiveutil"
 )
 
 func TestZipArchiveStreamsRestorableFiles(t *testing.T) {
@@ -30,7 +32,7 @@ func TestZipArchiveStreamsRestorableFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stream := zipArchive(bytes.NewReader(source.Bytes()))
+	stream := archiveutil.ZipTarGzip(bytes.NewReader(source.Bytes()))
 	defer stream.Close()
 	zipped, err := io.ReadAll(stream)
 	if err != nil {

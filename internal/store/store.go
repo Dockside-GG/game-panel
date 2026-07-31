@@ -40,6 +40,13 @@ type SetupStatus struct {
 	BootstrapEnabled bool   `json:"bootstrap_enabled"`
 }
 
+type InstallationSettings struct {
+	PublicURL               string `json:"public_url"`
+	DiscordClientID         string `json:"discord_client_id"`
+	DiscordSecretConfigured bool   `json:"discord_secret_configured"`
+	MFAPolicy               string `json:"mfa_policy"`
+}
+
 type User struct {
 	ID           string     `json:"id"`
 	DiscordID    string     `json:"discord_id"`
@@ -117,20 +124,42 @@ type ActivityEvent struct {
 
 func (s *Store) EnsureInstallation(
 	ctx context.Context,
-	id, publicURL, discordClientID, bootstrapToken, mfaPolicy string,
+	id, publicURL, discordClientID, discordClientSecret, bootstrapToken, mfaPolicy string,
+	box *secure.Box,
 ) error {
+	if box == nil {
+		return errors.New("installation secret encryption is not configured")
+	}
 	bootstrapHash := ""
 	if bootstrapToken != "" {
 		bootstrapHash = secure.Hash(bootstrapToken)
 	}
-	_, err := s.pool.Exec(ctx, `
+	encryptedSecret, err := box.Seal(
+		discordClientSecret, []byte("installation:discord_client_secret"),
+	)
+	if err != nil {
+		return fmt.Errorf("encrypt Discord client secret: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO installations(
-			id, public_url, discord_client_id, bootstrap_token_hash, mfa_policy
+			id, public_url, discord_client_id, discord_client_secret_encrypted,
+			bootstrap_token_hash, mfa_policy
 		)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6)
 		ON CONFLICT (id) DO UPDATE SET
-			public_url = EXCLUDED.public_url,
-			discord_client_id = EXCLUDED.discord_client_id,
+			public_url = CASE
+				WHEN installations.owner_user_id IS NULL THEN EXCLUDED.public_url
+				ELSE installations.public_url
+			END,
+			discord_client_id = CASE
+				WHEN installations.owner_user_id IS NULL THEN EXCLUDED.discord_client_id
+				ELSE installations.discord_client_id
+			END,
+			discord_client_secret_encrypted = CASE
+				WHEN installations.owner_user_id IS NULL
+					THEN EXCLUDED.discord_client_secret_encrypted
+				ELSE installations.discord_client_secret_encrypted
+			END,
 			bootstrap_token_hash = CASE
 				WHEN installations.owner_user_id IS NULL
 					THEN COALESCE(installations.bootstrap_token_hash, EXCLUDED.bootstrap_token_hash)
@@ -141,11 +170,76 @@ func (s *Store) EnsureInstallation(
 				ELSE installations.mfa_policy
 			END,
 			updated_at = now()
-	`, id, publicURL, discordClientID, bootstrapHash, mfaPolicy)
+	`, id, publicURL, discordClientID, encryptedSecret, bootstrapHash, mfaPolicy)
 	if err != nil {
 		return fmt.Errorf("ensure installation: %w", err)
 	}
 	return s.ensureBuiltInRoles(ctx, id)
+}
+
+func (s *Store) InstallationSettings(ctx context.Context) (InstallationSettings, error) {
+	var result InstallationSettings
+	err := s.pool.QueryRow(ctx, `
+		SELECT public_url, discord_client_id,
+		       discord_client_secret_encrypted <> '', mfa_policy
+		FROM installations
+		LIMIT 1
+	`).Scan(
+		&result.PublicURL, &result.DiscordClientID,
+		&result.DiscordSecretConfigured, &result.MFAPolicy,
+	)
+	return result, err
+}
+
+func (s *Store) DiscordCredentials(
+	ctx context.Context,
+	box *secure.Box,
+) (string, string, string, error) {
+	var publicURL, clientID, encryptedSecret string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT public_url, discord_client_id, discord_client_secret_encrypted
+		FROM installations
+		LIMIT 1
+	`).Scan(&publicURL, &clientID, &encryptedSecret); err != nil {
+		return "", "", "", err
+	}
+	secret, err := box.Open(
+		encryptedSecret, []byte("installation:discord_client_secret"),
+	)
+	if err != nil {
+		return "", "", "", fmt.Errorf("decrypt Discord client secret: %w", err)
+	}
+	return publicURL, clientID, secret, nil
+}
+
+func (s *Store) UpdateInstallationAuth(
+	ctx context.Context,
+	actorID, clientID string,
+	encryptedSecret *string,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE installations
+		SET discord_client_id = $1,
+		    discord_client_secret_encrypted = COALESCE($2, discord_client_secret_encrypted),
+		    updated_at = now()
+	`, clientID, encryptedSecret); err != nil {
+		return err
+	}
+	if err := insertAudit(
+		ctx, tx, actorID, "installation.discord_auth.update",
+		"installation", "", map[string]any{
+			"discord_client_id":      clientID,
+			"client_secret_replaced": encryptedSecret != nil,
+		},
+	); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) UpdateMFAPolicy(ctx context.Context, actorID, policy string) error {

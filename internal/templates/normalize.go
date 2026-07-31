@@ -15,11 +15,12 @@ import (
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 var networkEnvironmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+var restCommandName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 var advertisedPortArgument = regexp.MustCompile(
 	`(?i)(-{1,2}(?:publicport|public-port|advertisedport|advertised-port)\s*=?\s*)(\{\{SERVER_PORT\}\}|\{\{server\.allocations\.default\.port\}\}|\$\{SERVER_PORT\}|\$SERVER_PORT)`,
 )
 
-const canonicalNormalizationVersion = "6"
+const canonicalNormalizationVersion = "10"
 
 func Normalize(sourceKind, category, upstreamURL string, document json.RawMessage) (TemplateEntry, error) {
 	var egg struct {
@@ -89,13 +90,6 @@ func Normalize(sourceKind, category, upstreamURL string, document json.RawMessag
 	if startup == "" {
 		return TemplateEntry{}, errors.New("template has no startup command")
 	}
-	if strings.Contains(startup, `rcon -s -a "localhost:$RCON_PORT"`) {
-		startup = strings.ReplaceAll(
-			startup,
-			`rcon -s -a "localhost:$RCON_PORT"`,
-			`rcon -s -a "127.0.0.1:$RCON_PORT"`,
-		)
-	}
 	startup = advertisedPortArgument.ReplaceAllString(
 		startup, `${1}{{SERVER_PUBLIC_PORT}}`,
 	)
@@ -142,7 +136,7 @@ func Normalize(sourceKind, category, upstreamURL string, document json.RawMessag
 			))
 		}
 		secret := source.Secret || looksSecret(source.Environment, source.Name)
-		if secret && defaultValue != "" && sourceKind == "custom" {
+		if secret && defaultValue != "" {
 			defaultValue = ""
 			warnings = append(warnings, fmt.Sprintf(
 				"Removed the secret default for %s; secret values must be entered per server.",
@@ -163,7 +157,7 @@ func Normalize(sourceKind, category, upstreamURL string, document json.RawMessag
 	}
 
 	stopCommand := rawString(egg.Config["stop"])
-	networkPorts := inferNetworkPorts(egg.Name, category, startup, variables)
+	networkPorts := inferNetworkPorts(startup, variables)
 	if len(egg.Dockside.NetworkPorts) > 0 {
 		networkPorts, err = normalizeExplicitNetworkPorts(egg.Dockside.NetworkPorts)
 		if err != nil {
@@ -247,15 +241,6 @@ func normalizeCommandTransport(input CommandTransport) (CommandTransport, error)
 			return CommandTransport{}, errors.New("HTTP REST transport requires a rest definition")
 		}
 		rest := input.REST
-		rest.Method = strings.ToUpper(strings.TrimSpace(rest.Method))
-		if rest.Method == "" {
-			rest.Method = "POST"
-		}
-		switch rest.Method {
-		case "GET", "POST", "PUT", "PATCH", "DELETE":
-		default:
-			return CommandTransport{}, errors.New("HTTP REST transport method must be GET, POST, PUT, PATCH, or DELETE")
-		}
 		rest.PortEnvironment = strings.ToUpper(strings.TrimSpace(rest.PortEnvironment))
 		if rest.Port == 0 && rest.PortEnvironment == "" {
 			return CommandTransport{}, errors.New("HTTP REST transport requires a port or port environment")
@@ -264,38 +249,128 @@ func normalizeCommandTransport(input CommandTransport) (CommandTransport, error)
 			(rest.PortEnvironment != "" && !networkEnvironmentName.MatchString(rest.PortEnvironment)) {
 			return CommandTransport{}, errors.New("HTTP REST transport port is invalid")
 		}
-		rest.Path = strings.TrimSpace(rest.Path)
-		if rest.Path == "" {
-			rest.Path = "/"
-		}
-		if !strings.HasPrefix(rest.Path, "/") || strings.ContainsAny(rest.Path, "\r\n") ||
-			strings.Contains(rest.Path, "://") || len(rest.Path) > 2048 {
-			return CommandTransport{}, errors.New("HTTP REST transport path must be a local absolute path")
-		}
-		if len(rest.BodyTemplate) > 65536 || len(rest.Headers) > 24 {
-			return CommandTransport{}, errors.New("HTTP REST transport request definition is too large")
-		}
-		for name, value := range rest.Headers {
-			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n:") ||
-				strings.ContainsAny(value, "\r\n") || len(name) > 80 || len(value) > 4096 {
-				return CommandTransport{}, errors.New("HTTP REST transport contains an invalid header")
-			}
-		}
-		for _, status := range rest.AcceptedStatus {
-			if status < 100 || status > 599 {
-				return CommandTransport{}, errors.New("HTTP REST transport contains an invalid accepted status")
-			}
-		}
 		if rest.TimeoutSeconds == 0 {
 			rest.TimeoutSeconds = 10
 		}
 		if rest.TimeoutSeconds < 1 || rest.TimeoutSeconds > 60 {
 			return CommandTransport{}, errors.New("HTTP REST transport timeout must be 1-60 seconds")
 		}
+		if err := normalizeRESTHeaders(rest.Headers); err != nil {
+			return CommandTransport{}, err
+		}
+		if err := validateRESTStatuses(rest.AcceptedStatus); err != nil {
+			return CommandTransport{}, err
+		}
+		if rest.BasicAuth != nil {
+			rest.BasicAuth.Username = strings.TrimSpace(rest.BasicAuth.Username)
+			rest.BasicAuth.PasswordEnvironment = strings.ToUpper(
+				strings.TrimSpace(rest.BasicAuth.PasswordEnvironment),
+			)
+			if rest.BasicAuth.Username == "" || len(rest.BasicAuth.Username) > 256 ||
+				strings.ContainsAny(rest.BasicAuth.Username, "\x00\r\n:") ||
+				!networkEnvironmentName.MatchString(rest.BasicAuth.PasswordEnvironment) {
+				return CommandTransport{}, errors.New("HTTP REST basic authentication is invalid")
+			}
+		}
+		if len(rest.Routes) == 0 {
+			if err := normalizeRESTRequest(
+				&rest.Method, &rest.Path, rest.BodyTemplate, rest.Headers, rest.AcceptedStatus,
+			); err != nil {
+				return CommandTransport{}, err
+			}
+		} else {
+			if len(rest.Routes) > 64 {
+				return CommandTransport{}, errors.New("HTTP REST transport may declare at most 64 command routes")
+			}
+			rest.Method = ""
+			rest.Path = ""
+			rest.BodyTemplate = ""
+			seen := make(map[string]struct{}, len(rest.Routes))
+			for index := range rest.Routes {
+				route := &rest.Routes[index]
+				route.Command = strings.ToLower(strings.TrimSpace(route.Command))
+				route.Usage = strings.TrimSpace(route.Usage)
+				if !restCommandName.MatchString(route.Command) || len(route.Usage) > 256 ||
+					route.MinArgs < 0 || route.MinArgs > 32 {
+					return CommandTransport{}, errors.New("HTTP REST transport contains an invalid command route")
+				}
+				names := append([]string{route.Command}, route.Aliases...)
+				route.Aliases = route.Aliases[:0]
+				for nameIndex, name := range names {
+					name = strings.ToLower(strings.TrimSpace(name))
+					if !restCommandName.MatchString(name) {
+						return CommandTransport{}, errors.New("HTTP REST transport contains an invalid command alias")
+					}
+					if _, exists := seen[name]; exists {
+						return CommandTransport{}, fmt.Errorf("HTTP REST command name %q is duplicated", name)
+					}
+					seen[name] = struct{}{}
+					if nameIndex > 0 {
+						route.Aliases = append(route.Aliases, name)
+					}
+				}
+				if err := normalizeRESTHeaders(route.Headers); err != nil {
+					return CommandTransport{}, err
+				}
+				if err := normalizeRESTRequest(
+					&route.Method, &route.Path, route.BodyTemplate, route.Headers, route.AcceptedStatus,
+				); err != nil {
+					return CommandTransport{}, fmt.Errorf("HTTP REST command %q: %w", route.Command, err)
+				}
+			}
+		}
 	default:
 		return CommandTransport{}, errors.New("command transport must be auto, stdin, rcon, http_rest, or disabled")
 	}
 	return input, nil
+}
+
+func normalizeRESTRequest(
+	method, path *string,
+	body string,
+	headers map[string]string,
+	statuses []int,
+) error {
+	*method = strings.ToUpper(strings.TrimSpace(*method))
+	if *method == "" {
+		*method = "POST"
+	}
+	switch *method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+	default:
+		return errors.New("method must be GET, POST, PUT, PATCH, or DELETE")
+	}
+	*path = strings.TrimSpace(*path)
+	if *path == "" {
+		*path = "/"
+	}
+	if !strings.HasPrefix(*path, "/") || strings.ContainsAny(*path, "\r\n") ||
+		strings.Contains(*path, "://") || len(*path) > 2048 {
+		return errors.New("path must be a local absolute path")
+	}
+	if len(body) > 65536 || len(headers) > 24 {
+		return errors.New("request definition is too large")
+	}
+	return validateRESTStatuses(statuses)
+}
+
+func normalizeRESTHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n:") ||
+			strings.ContainsAny(value, "\r\n") || len(name) > 80 || len(value) > 4096 {
+			return errors.New("HTTP REST transport contains an invalid header")
+		}
+	}
+	return nil
+}
+
+func validateRESTStatuses(statuses []int) error {
+	for _, status := range statuses {
+		if status < 100 || status > 599 {
+			return errors.New("HTTP REST transport contains an invalid accepted status")
+		}
+	}
+	return nil
 }
 
 func validateBackupDefaults(input BackupDefaults) error {
@@ -353,8 +428,20 @@ func normalizeExplicitNetworkPorts(input []NetworkPort) ([]NetworkPort, error) {
 		}
 		seen[key] = struct{}{}
 		if port.Primary {
+			if port.InternalOnly {
+				return nil, errors.New("the primary Dockside network port cannot be internal-only")
+			}
 			primaryCount++
 			port.Required = true
+			port.Published = true
+		}
+		if port.InternalOnly && (port.Required || port.Published) {
+			return nil, fmt.Errorf(
+				"Dockside network port %q cannot be internal-only and published or required",
+				port.Name,
+			)
+		}
+		if port.Required {
 			port.Published = true
 		}
 		result = append(result, port)
@@ -365,7 +452,7 @@ func normalizeExplicitNetworkPorts(input []NetworkPort) ([]NetworkPort, error) {
 	return result, nil
 }
 
-func inferNetworkPorts(name, category, startup string, variables []Variable) []NetworkPort {
+func inferNetworkPorts(startup string, variables []Variable) []NetworkPort {
 	ports := make([]NetworkPort, 0, 4)
 	seen := make(map[string]struct{})
 	add := func(port NetworkPort) {
@@ -378,22 +465,6 @@ func inferNetworkPorts(name, category, startup string, variables []Variable) []N
 		}
 		seen[key] = struct{}{}
 		ports = append(ports, port)
-	}
-
-	identity := strings.ToLower(name + " " + category)
-	switch {
-	case strings.Contains(identity, "palworld"):
-		add(NetworkPort{
-			Name: "Game", Purpose: "Primary game traffic", ContainerPort: 8211,
-			Protocol: "udp", Primary: true, Required: true, Published: true,
-			Environment: "SERVER_PORT",
-		})
-	case strings.Contains(identity, "minecraft"):
-		add(NetworkPort{
-			Name: "Game", Purpose: "Primary game traffic", ContainerPort: 25565,
-			Protocol: "tcp", Primary: true, Required: true, Published: true,
-			Environment: "SERVER_PORT",
-		})
 	}
 
 	for _, variable := range variables {
@@ -464,7 +535,7 @@ func inferPortProtocol(environment, name string) string {
 			return "tcp"
 		}
 	}
-	for _, fragment := range []string{"QUERY", "STEAM", "BEACON", "UDP"} {
+	for _, fragment := range []string{"QUERY", "BEACON", "UDP"} {
 		if strings.Contains(identity, fragment) {
 			return "udp"
 		}

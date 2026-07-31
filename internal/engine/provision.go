@@ -82,6 +82,53 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
+func (s *Server) installExisting(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "serverID")
+	if !uuidPattern.MatchString(serverID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid server id"})
+		return
+	}
+	var input engineclient.InstallSpec
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 3<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation request"})
+		return
+	}
+	if err := s.validateRuntimeConfiguration(
+		"placeholder/image:latest", "true", input.Environment,
+		[]engineclient.Port{{HostIP: "0.0.0.0", HostPort: s.cfg.GamePortStart, ContainerPort: 1, Protocol: "tcp"}},
+		engineclient.Resources{}, &input,
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	containerID, err := s.findManagedServer(r.Context(), serverID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "managed server not found"})
+		return
+	}
+	inspected, err := s.docker.ContainerInspect(r.Context(), containerID)
+	if err != nil || inspected.State == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "managed server could not be inspected"})
+		return
+	}
+	if inspected.State.Running {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "server must be stopped before running its installer"})
+		return
+	}
+	names := s.resourceNames(serverID)
+	if err := s.runInstaller(
+		r.Context(), serverID, names.volume, names.network,
+		s.managedLabels(serverID), input,
+	); err != nil {
+		s.logger.Error("existing server installation failed", "server_id", serverID, "error", err)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "template installer failed", "detail": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) validateProvision(input engineclient.ProvisionRequest) error {
 	return s.validateRuntimeConfiguration(
 		input.Image,
@@ -264,7 +311,7 @@ func (s *Server) replaceRuntimeContainer(
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges:true"},
 			ReadonlyRootfs: false,
-			RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
+			RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 			LogConfig: container.LogConfig{
 				Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"},
 			},
@@ -400,7 +447,7 @@ func (s *Server) createServerResources(ctx context.Context, serverID string, inp
 		CapDrop:        []string{"ALL"},
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		ReadonlyRootfs: false,
-		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
+		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		LogConfig: container.LogConfig{
 			Type:   "json-file",
 			Config: map[string]string{"max-size": "10m", "max-file": "3"},

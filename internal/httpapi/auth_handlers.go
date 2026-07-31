@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/dockside-gg/game-panel/internal/discord"
 	"github.com/dockside-gg/game-panel/internal/identity"
 	"github.com/dockside-gg/game-panel/internal/store"
 )
@@ -68,6 +69,11 @@ func (s *Server) beginDiscord(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, err)
 		return
 	}
+	discordClient, err := s.discordClient(r)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthCookieName,
 		Value:    state,
@@ -77,7 +83,7 @@ func (s *Server) beginDiscord(w http.ResponseWriter, r *http.Request) {
 		Secure:   s.cfg.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"authorization_url": s.discord.AuthorizationURL(state)})
+	writeJSON(w, http.StatusOK, map[string]string{"authorization_url": discordClient.AuthorizationURL(state)})
 }
 
 func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
@@ -104,13 +110,19 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 		s.redirectAuthError(w, r, "oauth_state")
 		return
 	}
-	accessToken, err := s.discord.Exchange(r.Context(), code)
+	discordClient, err := s.discordClient(r)
+	if err != nil {
+		s.logger.Warn("load Discord OAuth settings failed", "request_id", requestIDFromContext(r.Context()), "error", err)
+		s.redirectAuthError(w, r, "discord_configuration")
+		return
+	}
+	accessToken, err := discordClient.Exchange(r.Context(), code)
 	if err != nil {
 		s.logger.Warn("discord token exchange failed", "request_id", requestIDFromContext(r.Context()), "error", err)
 		s.redirectAuthError(w, r, "discord_exchange")
 		return
 	}
-	discordUser, err := s.discord.CurrentUser(r.Context(), accessToken)
+	discordUser, err := discordClient.CurrentUser(r.Context(), accessToken)
 	if err != nil {
 		s.logger.Warn("discord user lookup failed", "request_id", requestIDFromContext(r.Context()), "error", err)
 		s.redirectAuthError(w, r, "discord_identity")
@@ -163,6 +175,15 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 		destination = "/pending"
 	}
 	http.Redirect(w, r, destination, http.StatusSeeOther)
+}
+
+func (s *Server) discordClient(r *http.Request) (*discord.Client, error) {
+	publicURL, clientID, secret, err := s.store.DiscordCredentials(r.Context(), s.box)
+	if err != nil {
+		return nil, err
+	}
+	redirectURI := publicURL + "/api/v1/auth/discord/callback"
+	return discord.New(clientID, secret, redirectURI), nil
 }
 
 func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {

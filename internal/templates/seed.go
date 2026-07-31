@@ -63,17 +63,21 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO templates(
-				id, slug, name, category, source_kind, upstream_url,
+				id, slug, name, category, source_kind, catalog_managed, upstream_url,
 				author, description, trust_state
 			)
-			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, 'curated')
+			VALUES ($1, $2, $3, $4, $5, false, NULLIF($6, ''), NULLIF($7, ''), $8, 'curated')
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name,
 				category = EXCLUDED.category,
+				source_kind = EXCLUDED.source_kind,
+				catalog_managed = false,
 				upstream_url = EXCLUDED.upstream_url,
 				author = EXCLUDED.author,
 				description = EXCLUDED.description,
+				archived_at = NULL,
 				updated_at = now()
+			WHERE NOT templates.catalog_managed
 			RETURNING id
 		`, templateID, entry.Slug, entry.Name, entry.Category, entry.SourceKind,
 			entry.UpstreamURL, entry.Author, entry.Description,

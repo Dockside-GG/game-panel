@@ -145,18 +145,14 @@ func validateScheduleTask(task scheduleTaskRequest) error {
 	switch task.TaskType {
 	case "backup":
 		var config struct {
-			Name             string   `json:"name"`
-			IncludePaths     []string `json:"include_paths"`
-			ExcludeGlobs     []string `json:"exclude_globs"`
-			RetentionDays    *int     `json:"retention_days"`
-			DiscordWebhookID *string  `json:"discord_webhook_id"`
-			DiscordFormat    string   `json:"discord_format"`
+			Name          string   `json:"name"`
+			IncludePaths  []string `json:"include_paths"`
+			ExcludeGlobs  []string `json:"exclude_globs"`
+			RetentionDays *int     `json:"retention_days"`
 		}
 		if json.Unmarshal(task.Config, &config) != nil || strings.TrimSpace(config.Name) == "" ||
 			!validBackupRules(config.IncludePaths) || !validBackupRules(config.ExcludeGlobs) ||
-			(config.RetentionDays != nil && (*config.RetentionDays < 1 || *config.RetentionDays > 3650)) ||
-			(config.DiscordWebhookID != nil &&
-				config.DiscordFormat != "zip" && config.DiscordFormat != "archive") {
+			(config.RetentionDays != nil && (*config.RetentionDays < 1 || *config.RetentionDays > 3650)) {
 			return errors.New("invalid scheduled backup task")
 		}
 	case "power":

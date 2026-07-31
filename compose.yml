@@ -52,6 +52,8 @@ services:
       DOCKSIDE_ENGINE_URL: http://engine:8081
       DOCKSIDE_GAME_PORT_START: ${DOCKSIDE_GAME_PORT_START:-20000}
       DOCKSIDE_GAME_PORT_END: ${DOCKSIDE_GAME_PORT_END:-29999}
+      DOCKSIDE_TEMPLATE_CATALOG_URL: ${DOCKSIDE_TEMPLATE_CATALOG_URL:-https://raw.githubusercontent.com/Dockside-GG/game-panel-templates/main/catalog.json}
+      DOCKSIDE_TEMPLATE_SYNC_INTERVAL: ${DOCKSIDE_TEMPLATE_SYNC_INTERVAL:-6h}
       DOCKSIDE_SERVER_UID: ${DOCKSIDE_SERVER_UID:-1000}
       DOCKSIDE_SERVER_GID: ${DOCKSIDE_SERVER_GID:-1000}
       DOCKSIDE_LOG_LEVEL: ${DOCKSIDE_LOG_LEVEL:-info}
@@ -109,6 +111,7 @@ services:
       - engine_token
     networks:
       - control
+      - egress
     read_only: true
     tmpfs:
       - /tmp:size=128m,mode=1777
@@ -190,6 +193,7 @@ services:
 
 networks:
   edge:
+  egress:
   control:
     internal: true
 

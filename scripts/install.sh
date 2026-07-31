@@ -5,6 +5,15 @@ umask 077
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
+release_version=""
+if [[ -f .dockside-release ]]; then
+  release_version="$(tr -d '\r\n' < .dockside-release)"
+  if [[ ! "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    printf 'The release bundle contains invalid version metadata.\n' >&2
+    exit 1
+  fi
+fi
+
 die() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
@@ -137,7 +146,12 @@ game_port_start="$(read_default "First game-server host port" "20000")"
 game_port_end="$(read_default "Last game-server host port" "29999")"
 [[ "$game_port_start" =~ ^[0-9]+$ && "$game_port_end" =~ ^[0-9]+$ ]] || die "Game ports must be numeric."
 (( game_port_start >= 1024 && game_port_end <= 65535 && game_port_start <= game_port_end )) || die "Invalid game port range."
-version="$(read_default "Panel image version (use dev to build this checkout)" "dev")"
+if [[ -n "$release_version" ]]; then
+  version="$release_version"
+  printf 'Using release bundle version %s.\n' "$version"
+else
+  version="$(read_default "Panel image version (use dev to build this checkout)" "dev")"
+fi
 [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "The panel image version contains unsupported characters."
 
 mkdir -p secrets deploy/generated data/servers data/backups

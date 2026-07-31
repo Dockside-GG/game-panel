@@ -12,6 +12,14 @@ Set-Location $ProjectRoot
 if (-not (Test-Path -LiteralPath ".env")) {
     throw "No .env file was found. Run scripts\install.ps1 for a new installation."
 }
+$ReleaseMetadataPath = Join-Path $ProjectRoot ".dockside-release"
+if (-not $Version -and (Test-Path -LiteralPath $ReleaseMetadataPath)) {
+    $Version = [IO.File]::ReadAllText($ReleaseMetadataPath).Trim()
+    if ($Version -notmatch "^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$") {
+        throw "The release bundle contains invalid version metadata."
+    }
+    Write-Host "Using release bundle version $Version."
+}
 if ($Version -and $Version -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") {
     throw "The panel image version contains unsupported characters."
 }

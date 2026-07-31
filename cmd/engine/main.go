@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dockside-gg/game-panel/internal/buildinfo"
 	"github.com/dockside-gg/game-panel/internal/config"
 	"github.com/dockside-gg/game-panel/internal/engine"
 	"github.com/dockside-gg/game-panel/internal/healthcheck"
@@ -18,12 +19,21 @@ import (
 
 func main() {
 	healthcheck.MaybeRun(os.Args)
+	if engine.MaybeRunUpdateHelper(os.Args) {
+		return
+	}
 	cfg, err := config.Load("engine")
 	if err != nil {
 		slog.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	logger := logging.New(cfg.LogLevel).With("component", "engine", "instance_id", cfg.InstanceID)
+	build := buildinfo.Current()
+	logger := logging.New(cfg.LogLevel).With(
+		"component", "engine",
+		"instance_id", cfg.InstanceID,
+		"version", build.Version,
+		"revision", build.Revision,
+	)
 	runtime, err := engine.New(cfg, logger)
 	if err != nil {
 		logger.Error("engine initialization failed", "error", err)

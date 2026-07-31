@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,8 +37,12 @@ type updateUserAccessRequest struct {
 }
 
 type updateInstallationSettingsRequest struct {
-	MFAPolicy string `json:"mfa_policy"`
+	MFAPolicy           string `json:"mfa_policy,omitempty"`
+	DiscordClientID     string `json:"discord_client_id,omitempty"`
+	DiscordClientSecret string `json:"discord_client_secret,omitempty"`
 }
+
+var discordClientIDPattern = regexp.MustCompile(`^[0-9]{17,32}$`)
 
 func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {
 	var input activateUserRequest
@@ -123,12 +128,12 @@ func (s *Server) setUserServerAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) installationSettings(w http.ResponseWriter, r *http.Request) {
-	status, err := s.store.SetupStatus(r.Context())
+	settings, err := s.store.InstallationSettings(r.Context())
 	if err != nil {
 		writeProblem(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"mfa_policy": status.MFAPolicy})
+	writeJSON(w, http.StatusOK, settings)
 }
 
 func (s *Server) updateInstallationSettings(w http.ResponseWriter, r *http.Request) {
@@ -137,11 +142,57 @@ func (s *Server) updateInstallationSettings(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if err := s.store.UpdateMFAPolicy(
-		r.Context(), session.User.ID, input.MFAPolicy,
-	); err != nil {
-		writeProblem(w, r, err)
+	input.MFAPolicy = strings.TrimSpace(input.MFAPolicy)
+	input.DiscordClientID = strings.TrimSpace(input.DiscordClientID)
+	input.DiscordClientSecret = strings.TrimSpace(input.DiscordClientSecret)
+	if input.MFAPolicy == "" && input.DiscordClientID == "" && input.DiscordClientSecret == "" {
+		writeProblem(w, r, errors.Join(errBadRequest, errors.New("no installation setting was supplied")))
 		return
+	}
+	if input.MFAPolicy != "" {
+		if err := s.store.UpdateMFAPolicy(
+			r.Context(), session.User.ID, input.MFAPolicy,
+		); err != nil {
+			writeProblem(w, r, err)
+			return
+		}
+	}
+	if input.DiscordClientID != "" || input.DiscordClientSecret != "" {
+		settings, err := s.store.InstallationSettings(r.Context())
+		if err != nil {
+			writeProblem(w, r, err)
+			return
+		}
+		clientID := input.DiscordClientID
+		if clientID == "" {
+			clientID = settings.DiscordClientID
+		}
+		if !discordClientIDPattern.MatchString(clientID) {
+			writeProblem(w, r, errors.Join(errBadRequest, errors.New("Discord client ID must contain 17-32 digits")))
+			return
+		}
+		var encryptedSecret *string
+		if input.DiscordClientSecret != "" {
+			if len(input.DiscordClientSecret) < 24 || len(input.DiscordClientSecret) > 256 {
+				writeProblem(w, r, errors.Join(errBadRequest, errors.New("Discord client secret must contain 24-256 characters")))
+				return
+			}
+			encrypted, err := s.box.Seal(
+				input.DiscordClientSecret,
+				[]byte("installation:discord_client_secret"),
+			)
+			if err != nil {
+				writeProblem(w, r, err)
+				return
+			}
+			encryptedSecret = &encrypted
+		}
+		if err := s.store.UpdateInstallationAuth(
+			r.Context(), session.User.ID, clientID, encryptedSecret,
+		); err != nil {
+			writeProblem(w, r, err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

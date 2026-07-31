@@ -60,10 +60,10 @@ Do not add `--volumes` unless intentionally deleting the development database an
 - `internal/httpapi`: browser-facing API handlers and authorization.
 - `internal/store`: PostgreSQL persistence and transactional state transitions.
 - `internal/engine`: Docker, console, file, backup, database, network, and telemetry operations.
-- `internal/templates`: compatible template normalization and Dockside canonical validation.
-- `internal/db/migrations`: ordered PostgreSQL migrations applied at startup.
+- `internal/templates`: catalog synchronization, compatibility normalization, Dockside export, and canonical validation.
+- `internal/db/migrations/0001_initial.sql`: the single fresh-development
+  PostgreSQL schema applied at startup.
 - `web`: React and TypeScript application.
-- `templates/sources`: release-bundled Pelican and Pterodactyl template source files.
 - `scripts`: guided installation and upgrade scripts.
 - `deploy`: Caddy and deployment configuration.
 
@@ -72,13 +72,13 @@ Do not add `--volumes` unless intentionally deleting the development database an
 Format Go files:
 
 ```bash
-gofmt -w ./cmd ./internal ./templates
+gofmt -w ./cmd ./internal
 ```
 
 Run backend tests:
 
 ```bash
-go test ./cmd/... ./internal/... ./templates/...
+go test ./cmd/... ./internal/...
 ```
 
 The engine tests exercise privileged behavior through interfaces and fixtures. Do not make the application or worker mount the Docker socket to simplify a test.
@@ -102,19 +102,25 @@ pnpm build
 
 The normal integrated UI is embedded into the Go application during the Docker build. The standalone Vite server is for focused frontend work.
 
-## Database migrations
+## Database schema during early development
 
-Migrations are append-only SQL files under `internal/db/migrations`.
+Until `v0.1.0-alpha.1` is published, update the existing base SQL under `internal/db/migrations` directly and recreate the disposable development PostgreSQL volume after schema changes. The first published alpha establishes the upgrade boundary: after it ships, freeze `0001_initial.sql` and add new forward-only migrations for every schema change. Do not rewrite migrations that have appeared in a release.
 
-- Never edit a migration that may already have been applied.
-- Create the next numerically ordered migration.
-- Make schema changes backward-readable during rolling development where practical.
-- Test both a new database and an upgrade from the previous migration.
-- Do not place credentials or environment-specific values in migrations.
+Never place credentials or environment-specific values in schema SQL.
 
 ## Template development
 
-The running panel reads the release-bundled catalog and stored PostgreSQL versions. It does not fetch a remote catalog. Use the visual editor for normal authoring and the JSON import surface for advanced work.
+The panel loads the release-bundled Pelican and Pterodactyl compatibility
+snapshots without network access. It separately attempts to fetch the
+Dockside-native public catalog during startup and on its configured interval.
+A remote failure is recorded in diagnostics but does not prevent startup or
+remove already stored/bundled definitions.
+
+Use the visual editor for normal authoring and the raw JSON editor,
+upload/export, and server-to-template workflow for advanced work. The ignored
+`template-repository-scaffold/` directory contains a complete, copyable starting
+point for `Dockside-GG/game-panel-templates`; that public repository accepts only
+Dockside-native templates.
 
 See [Creating Dockside templates](TEMPLATES.md) for the complete Dockside specification and compatibility rules.
 
@@ -133,14 +139,18 @@ Read [Security](SECURITY.md) before changing authentication, secrets, uploads, a
 
 Release archives and published container tags are immutable inputs for release installation. A development checkout builds `dev` images from local source through `compose.dev.yml`.
 
+The release packaging commands, container build metadata, acceptance matrix,
+and GitHub automation contract are documented in [Releasing Dockside](RELEASING.md).
+
 Do not present a source checkout as a stable release. Before publishing a release:
 
 1. Run all Go tests and frontend checks.
 2. Build every Docker target.
 3. Test a fresh Windows installation and a fresh Linux installation.
 4. Test local, existing-reverse-proxy, and direct-HTTPS modes.
-5. Test database migration from the prior release.
-6. Verify the bundled template catalog.
+5. Test a fresh database schema.
+6. Verify bundled compatibility loading and Dockside-native catalog
+   synchronization independently.
 7. Document breaking changes and backup requirements.
 
 ## Troubleshooting

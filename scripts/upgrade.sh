@@ -7,6 +7,14 @@ cd "$project_root"
 [[ -f .env ]] || { printf 'No .env file found; run scripts/install.sh first.\n' >&2; exit 1; }
 
 version="${1:-}"
+if [[ -z "$version" && -f .dockside-release ]]; then
+  version="$(tr -d '\r\n' < .dockside-release)"
+  if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    printf 'The release bundle contains invalid version metadata.\n' >&2
+    exit 1
+  fi
+  printf 'Using release bundle version %s.\n' "$version"
+fi
 if [[ -n "$version" && ! "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
   printf 'The panel image version contains unsupported characters.\n' >&2
   exit 1

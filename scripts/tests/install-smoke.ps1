@@ -20,11 +20,22 @@ function Assert-Line {
 }
 
 function Invoke-InstallerCase {
-    param([string]$Name, [hashtable]$InstallerArguments)
+    param(
+        [string]$Name,
+        [hashtable]$InstallerArguments,
+        [string]$ReleaseVersion = ""
+    )
     $caseRoot = Join-Path $TestRoot $Name
     $scriptsRoot = Join-Path $caseRoot "scripts"
     New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
     Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\install.ps1") -Destination $scriptsRoot
+    if ($ReleaseVersion) {
+        [IO.File]::WriteAllText(
+            (Join-Path $caseRoot ".dockside-release"),
+            "$ReleaseVersion`n",
+            (New-Object Text.UTF8Encoding($false))
+        )
+    }
     $env:DOCKSIDE_INSTALL_DISCORD_CLIENT_SECRET = "$Name-test-secret"
     & (Join-Path $scriptsRoot "install.ps1") @InstallerArguments -NoStart *> $null
     return $caseRoot
@@ -80,6 +91,17 @@ try {
     Assert-Line (Join-Path $publicRoot ".env") "DOCKSIDE_BIND_ADDRESS=0.0.0.0"
     Assert-Line (Join-Path $publicRoot ".env") "DOCKSIDE_HTTP_PORT=80"
     Assert-Line (Join-Path $publicRoot ".env") "DOCKSIDE_HTTPS_PORT=443"
+
+    $releaseRoot = Invoke-InstallerCase "release" @{
+        Mode = "local"
+        PublicUrl = "http://localhost:18090"
+        ListenPort = 18090
+        DiscordClientId = "123456789012345678"
+        MfaPolicy = "administrators"
+        GamePortStart = 23000
+        GamePortEnd = 23099
+    } "0.1.0-alpha.1"
+    Assert-Line (Join-Path $releaseRoot ".env") "DOCKSIDE_VERSION=0.1.0-alpha.1"
 
     Write-Output "Windows guided installer smoke tests passed."
 } finally {

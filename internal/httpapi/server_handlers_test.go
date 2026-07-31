@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dockside-gg/game-panel/internal/store"
 	"github.com/dockside-gg/game-panel/internal/templates"
 )
 
@@ -62,5 +63,52 @@ func TestValidateTemplateVariablesRejectsLockedOverride(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "not user editable") {
 		t.Fatalf("validateTemplateVariables() error = %v", err)
+	}
+}
+
+func TestValidateTemplatePortPolicyRejectsInternalOnlyPublication(t *testing.T) {
+	definitions := []templates.NetworkPort{{
+		Name: "REST API", ContainerPort: 8080, Protocol: "tcp",
+		InternalOnly: true, Environment: "REST_PORT",
+	}}
+	published := []store.ServerPort{{
+		ContainerPort: 8080, Protocol: "tcp", Environment: "REST_PORT",
+	}}
+
+	err := validateTemplatePortPolicy(definitions, published)
+	if err == nil || !strings.Contains(err.Error(), "internal-only") {
+		t.Fatalf("expected internal-only policy error, got %v", err)
+	}
+}
+
+func TestValidateTemplatePortPolicyAllowsOptionalInternalPortToRemainUnpublished(t *testing.T) {
+	definitions := []templates.NetworkPort{
+		{
+			Name: "Game", ContainerPort: 25565, Protocol: "udp",
+			Primary: true, Required: true, Published: true, Environment: "SERVER_PORT",
+		},
+		{
+			Name: "REST API", ContainerPort: 8080, Protocol: "tcp",
+			InternalOnly: true, Environment: "REST_PORT",
+		},
+	}
+	published := []store.ServerPort{{
+		ContainerPort: 25565, Protocol: "udp", Environment: "SERVER_PORT", IsPrimary: true,
+	}}
+
+	if err := validateTemplatePortPolicy(definitions, published); err != nil {
+		t.Fatalf("expected valid port policy, got %v", err)
+	}
+}
+
+func TestValidateTemplatePortPolicyRequiresRequiredAllocation(t *testing.T) {
+	definitions := []templates.NetworkPort{{
+		Name: "Game", ContainerPort: 25565, Protocol: "udp",
+		Primary: true, Required: true, Published: true, Environment: "SERVER_PORT",
+	}}
+
+	err := validateTemplatePortPolicy(definitions, nil)
+	if err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("expected required port policy error, got %v", err)
 	}
 }
