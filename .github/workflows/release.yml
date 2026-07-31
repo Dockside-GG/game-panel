@@ -100,25 +100,35 @@ jobs:
             exit 1
           fi
 
-      - name: Verify and test Go code
-        shell: bash
-        run: |
-          go mod verify
-          go test ./cmd/... ./internal/... ./templates/...
-          go vet ./cmd/... ./internal/... ./templates/...
+      - name: Verify Go modules
+        run: go mod verify
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "24.14.0"
 
-      - name: Build web application
+      - name: Build embedded web application
         shell: bash
         run: |
           corepack enable
           corepack pnpm --dir web install --frozen-lockfile
           corepack pnpm --dir web lint
           corepack pnpm --dir web build
+
+      - name: Verify embedded web assets
+        shell: bash
+        run: |
+          test -f internal/webui/dist/index.html || {
+            echo "::error::The web build did not create internal/webui/dist/index.html"
+            exit 1
+          }
+
+      - name: Test Go code with embedded UI
+        shell: bash
+        run: |
+          go test ./cmd/... ./internal/... ./templates/...
+          go vet ./cmd/... ./internal/... ./templates/...
 
       - name: Test Linux installer
         shell: bash
