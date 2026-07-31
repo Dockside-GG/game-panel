@@ -10,6 +10,5 @@ Start here:
 - [Operations, upgrades, backup, and recovery](../OPERATIONS.md)
 - [Architecture](../ARCHITECTURE.md)
 - [Security](../SECURITY.md)
-- [Product and engineering plan](../PROJECT_PLAN.md)
 
 These Markdown pages are kept in the repository so documentation changes can be reviewed with code. They can be copied directly into a GitHub Wiki if a separate wiki repository is enabled.
