@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-web:
+    name: Go and web
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Verify Go formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files are not formatted:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Run Go tests
+        run: go test ./cmd/... ./internal/... ./templates/...
+
+      - name: Run Go vet
+        run: go vet ./cmd/... ./internal/... ./templates/...
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.14.0"
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install web dependencies
+        run: corepack pnpm --dir web install --frozen-lockfile
+
+      - name: Lint web application
+        run: corepack pnpm --dir web lint
+
+      - name: Build web application
+        run: corepack pnpm --dir web build
+
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Run Windows installer smoke tests
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File .\scripts\tests\install-smoke.ps1
+
+  linux-installer:
+    name: Linux installer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Run Linux installer smoke tests
+        shell: bash
+        run: |
+          chmod +x scripts/install.sh scripts/tests/install-smoke.sh
+          bash scripts/tests/install-smoke.sh
+
+  docker-package:
+    name: Docker and package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Read candidate metadata
+        id: metadata
+        shell: bash
+        run: |
+          echo "version=$(jq -r '.version' web/package.json)" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Compose validation inputs
+        shell: bash
+        run: |
+          cp .env.example .env
+          mkdir -p secrets
+          for name in postgres_password database_url encryption_key session_key discord_client_secret bootstrap_token engine_token; do
+            printf 'ci-placeholder\n' > "secrets/$name"
+          done
+
+      - name: Validate Compose configurations
+        shell: bash
+        run: |
+          docker compose --env-file .env config --quiet
+          docker compose --env-file .env \
+            -f compose.yml -f compose.dev.yml config --quiet
+          docker compose --env-file .env \
+            -f compose.yml -f compose.public.yml config --quiet
+
+      - name: Build application image
+        shell: bash
+        run: |
+          docker build \
+            --build-arg DOCKSIDE_VERSION=${{ steps.metadata.outputs.version }} \
+            --build-arg DOCKSIDE_REVISION=${{ github.sha }} \
+            --build-arg DOCKSIDE_BUILT_AT=${{ steps.metadata.outputs.built_at }} \
+            --target app .
+
+      - name: Build worker image
+        shell: bash
+        run: |
+          docker build \
+            --build-arg DOCKSIDE_VERSION=${{ steps.metadata.outputs.version }} \
+            --build-arg DOCKSIDE_REVISION=${{ github.sha }} \
+            --build-arg DOCKSIDE_BUILT_AT=${{ steps.metadata.outputs.built_at }} \
+            --target worker .
+
+      - name: Build engine image
+        shell: bash
+        run: |
+          docker build \
+            --build-arg DOCKSIDE_VERSION=${{ steps.metadata.outputs.version }} \
+            --build-arg DOCKSIDE_REVISION=${{ github.sha }} \
+            --build-arg DOCKSIDE_BUILT_AT=${{ steps.metadata.outputs.built_at }} \
+            --target engine .
+
+      - name: Build installation archives
+        shell: bash
+        run: |
+          chmod +x scripts/package-release.sh
+          scripts/package-release.sh "${{ steps.metadata.outputs.version }}"
+
+      - name: Verify installation archive checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum -c SHA256SUMS
