@@ -1,0 +1,78 @@
+name: Bug report
+description: Report reproducible incorrect behavior in the Dockside panel
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Dockside is early-development software and is not recommended for production use.
+        Remove credentials, webhook URLs, tokens, public IPs, player data, and private files from all reports.
+  - type: input
+    id: version
+    attributes:
+      label: Dockside version
+      description: Release tag or full Git commit.
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host operating system
+      options:
+        - Linux
+        - Windows with Docker Desktop
+        - macOS with Docker Desktop
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: docker
+    attributes:
+      label: Docker and Compose versions
+      placeholder: Docker 28.x, Compose v2.x
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the incorrect behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only relevant, redacted logs. Do not attach `.env`, secret files, backups, or databases.
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Safety checks
+      options:
+        - label: I searched existing issues for this behavior.
+          required: true
+        - label: I removed secrets, personal information, private server data, and public IP addresses.
+          required: true
+        - label: I understand Dockside is early-development software and I have independent backups.
+          required: true

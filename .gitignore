@@ -1,0 +1,72 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Runtime state and user data
+data/
+backups/
+volumes/
+deploy/generated/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.dump
+
+# Dependencies and generated frontend output
+web/node_modules/
+web/dist/
+web/.vite/
+web/.eslintcache
+web/*.tsbuildinfo
+.pnpm-store/
+node_modules/
+
+# Build, test, and coverage output
+bin/
+dist/
+artifacts/
+coverage/
+test-results/
+playwright-report/
+tmp/
+.tools/
+*.out
+*.prof
+*.test
+
+# Logs and temporary/editor files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.fleet/
+.codex/
+.agents/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local Compose overrides
+compose.override.yml
+docker-compose.override.yml
+
+# Generated embedded assets. Keep the placeholders/catalog required to build.
+internal/webui/dist/*
+!internal/webui/dist/index.html
+templates/library/generated/*
+!templates/library/generated/catalog.json
