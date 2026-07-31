@@ -7,11 +7,26 @@ restarting therefore remain visible while Docker performs the operation. A stopp
 server is always shown in red; an unexpected stop also includes a warning indicator
 and an `unexpected_exit` activity event.
 
-Automatic recovery is enabled by default and can be changed in each server's Settings
-page. Dockside makes at most five attempts in a ten-minute window, using delays of 5,
-15, 30, 60, and 120 seconds. A server that exhausts the policy remains stopped until
-an operator intervenes. Intentional panel power actions and template-recognized
-shutdown commands do not trigger recovery.
+Running game servers are always supervised. Their containers use Docker's
+`unless-stopped` policy for immediate local recovery, while Dockside retains the
+requested state and reconciles it from the worker. Recovery uses delays of 5, 15,
+30, 60, and 120 seconds. After the fifth failed attempt, Dockside continues retrying
+every 120 seconds and records a persistent-recovery warning; it never silently
+changes a running request into a stopped request.
+
+Only an explicit panel Stop or Kill action, including one executed by a schedule,
+creates a persistent stopped request. Dockside disables the Docker restart policy
+before issuing those actions and cancels queued recovery work. Start and Restart
+re-enable the policy. Backup restore, template update, and reconfiguration workflows
+temporarily suppress recovery and restore the server's previous requested state when
+they finish.
+
+A command matching the template-declared stop command is treated as an in-game
+restart request: the UI changes to Restarting, the requested state stays running,
+and the process is started again after it exits. Other clean exits and crashes are
+also restarted; unexpected exits additionally create warning activity. Recovery
+counters reset after five minutes of stable runtime rather than after one running
+observation.
 
 During provisioning, the Console page follows the installer container and then moves
 to the runtime container. Command input stays unavailable while provisioning and
@@ -46,7 +61,12 @@ The dashboard samples CPU, memory, load average, game-data storage, and backup s
 
 Dockside system-container health is visible only to panel owners and administrators. The inventory is selected by the installation-specific `gg.dockside.system`, `gg.dockside.instance`, and `gg.dockside.component` labels; unrelated host containers are never returned.
 
-The web UI cannot stop or kill system containers. It also cannot restart the app, gateway, engine, or PostgreSQL. An owner may restart only the background worker, with confirmation and an audit event. Use authenticated host access and Docker Compose for all other maintenance.
+The web UI does not expose raw stop, kill, or restart controls for system
+containers. An owner may restart the background worker with confirmation and
+may start the bounded, release-verified panel updater. The updater uses a
+short-lived helper, creates a complete pre-update recovery set, and recreates
+the panel through Docker Compose; it is not a general Docker control surface.
+Use authenticated host access and Docker Compose for all other maintenance.
 
 ## Start, stop, and restart
 
@@ -56,9 +76,17 @@ docker compose --env-file .env stop
 docker compose --env-file .env restart app worker
 ```
 
-Stopping the panel stack does not delete managed game-server containers. Power state continues according to Docker, but schedules and telemetry resume only when the worker returns.
+Stopping the panel stack does not delete managed game-server containers. A game
+server whose requested state is running remains protected by Docker's restart
+policy while the panel is unavailable. Schedules, activity recording, and
+desired-state reconciliation resume when the worker returns.
 
 ## Upgrade
+
+For a published release installation, the recommended path is **Panel settings
+→ Panel version & updates**. Read [Panel updates and recovery
+snapshots](UPDATES.md) before the first update. Development installations must
+continue using the source-based commands below.
 
 Windows:
 

@@ -289,6 +289,32 @@ input:disabled, select:disabled, textarea:disabled { color: #718291; cursor: not
 .global-activity-list article > div span { color: #667786; font-size: 13px; }
 .installation-details { overflow: hidden; }
 .installation-details code { color: #b7eefe; overflow-wrap: anywhere; }
+.panel-update-settings { margin-bottom: 20px; overflow: hidden; }
+.panel-update-body { display: grid; gap: 18px; padding: 22px 23px; }
+.panel-update-version { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.panel-update-icon { display: grid; place-items: center; flex: 0 0 auto; width: 46px; height: 46px; color: var(--cyan); border: 1px solid rgba(17,195,245,.2); border-radius: 10px; background: rgba(17,195,245,.07); }
+.panel-update-version > div { display: grid; gap: 3px; min-width: 0; }
+.panel-update-version span, .panel-release-card span { color: #6f8190; font-size: 13px; }
+.panel-update-version strong { color: #edf7fb; font-size: 24px; }
+.panel-update-version small, .panel-release-card small, .panel-update-progress small { color: #718391; font-size: 13px; }
+.panel-update-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 4px; }
+.checkbox-row { display: flex; align-items: center; gap: 10px; color: #aebdc8; font-size: 14px; cursor: pointer; }
+.checkbox-row input { width: 17px; height: 17px; accent-color: var(--blue); }
+.panel-release-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px 18px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.018); }
+.panel-release-card.available { border-color: rgba(50,213,131,.2); background: rgba(50,213,131,.045); }
+.panel-release-card > div:first-child { display: grid; gap: 4px; }
+.panel-release-card strong { color: #dce9ee; font-size: 18px; }
+.panel-release-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+.panel-update-progress { display: grid; gap: 10px; padding: 15px 16px; border: 1px solid rgba(17,195,245,.18); border-radius: 9px; background: rgba(17,195,245,.045); }
+.panel-update-progress.failed { border-color: rgba(249,112,102,.25); background: rgba(249,112,102,.05); }
+.panel-update-progress.succeeded { border-color: rgba(50,213,131,.22); background: rgba(50,213,131,.05); }
+.panel-update-progress > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+.panel-update-progress strong { color: #d9e7ed; font-size: 15px; }
+.panel-update-progress code, .panel-update-footnote code { color: #a9eaff; overflow-wrap: anywhere; }
+.indeterminate-progress { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(145,168,187,.12); }
+.indeterminate-progress i { display: block; width: 34%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--cyan)); animation: update-progress 1.25s ease-in-out infinite; }
+.panel-update-footnote { margin: 0; color: #667887; font-size: 13px; line-height: 1.55; }
+@keyframes update-progress { from { transform: translateX(-105%); } to { transform: translateX(300%); } }
 .concealed-value { display: flex; align-items: center; gap: 9px; }
 .concealed-value code { min-width: 190px; letter-spacing: .06em; }
 .concealed-value .icon-button { flex: 0 0 auto; width: 31px; height: 31px; }
@@ -850,6 +876,9 @@ input, select, textarea { min-height: 48px; }
 }
 
 @media (max-width: 760px) {
+  .panel-update-controls, .panel-release-card { align-items: stretch; flex-direction: column; }
+  .panel-release-actions { justify-content: stretch; }
+  .panel-release-actions .button { flex: 1; }
   .auth-layout { grid-template-columns: 1fr; }
   .auth-story { display: none; }
   .auth-main { grid-template-rows: auto auto; align-content: center; gap: 28px; min-height: 100vh; padding: 24px 20px; }

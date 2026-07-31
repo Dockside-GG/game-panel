@@ -67,6 +67,8 @@ func (s *Server) Handler() http.Handler {
 		api.Get("/v1/system/containers", s.systemContainers)
 		api.Get("/v1/system/containers/{component}/logs", s.systemContainerLogs)
 		api.Post("/v1/system/containers/worker/restart", s.restartWorker)
+		api.Get("/v1/system/update", s.panelUpdateStatus)
+		api.Post("/v1/system/update", s.startPanelUpdate)
 		api.Get("/v1/servers/stats", s.serverStats)
 		api.Get("/v1/servers/{serverID}/console", s.consoleLogs)
 		api.Post("/v1/servers/{serverID}/console", s.consoleCommand)
@@ -191,6 +193,12 @@ func (s *Server) power(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
+	switch input.Action {
+	case "start", "stop", "restart", "kill":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid power action"})
+		return
+	}
 	containerID, err := s.findManagedServer(r.Context(), serverID)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
@@ -202,15 +210,44 @@ func (s *Server) power(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	timeout := 30
+	policyEnabled := input.Action == "start" || input.Action == "restart"
+	if err := s.setServerRestartPolicy(r.Context(), containerID, policyEnabled); err != nil {
+		s.logger.Error(
+			"update server restart policy failed",
+			"server_id", serverID,
+			"action", input.Action,
+			"error", err,
+		)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "power action failed"})
+		return
+	}
+	inspected, err := s.docker.ContainerInspect(r.Context(), containerID)
+	if err != nil {
+		s.logger.Error("inspect server before power action failed", "server_id", serverID, "error", err)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "power action failed"})
+		return
+	}
+	running := inspected.State != nil && inspected.State.Running
+	restarting := inspected.State != nil && inspected.State.Restarting
 	switch input.Action {
 	case "start":
-		err = s.docker.ContainerStart(r.Context(), containerID, container.StartOptions{})
+		if !running && !restarting {
+			err = s.docker.ContainerStart(r.Context(), containerID, container.StartOptions{})
+		}
 	case "stop":
-		err = s.docker.ContainerStop(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+		if running {
+			err = s.docker.ContainerStop(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+		}
 	case "restart":
-		err = s.docker.ContainerRestart(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+		if running {
+			err = s.docker.ContainerRestart(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+		} else if !restarting {
+			err = s.docker.ContainerStart(r.Context(), containerID, container.StartOptions{})
+		}
 	case "kill":
-		err = s.docker.ContainerKill(r.Context(), containerID, "KILL")
+		if running {
+			err = s.docker.ContainerKill(r.Context(), containerID, "KILL")
+		}
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid power action"})
 		return
@@ -221,6 +258,21 @@ func (s *Server) power(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) setServerRestartPolicy(
+	ctx context.Context,
+	containerID string,
+	enabled bool,
+) error {
+	policy := container.RestartPolicyDisabled
+	if enabled {
+		policy = container.RestartPolicyUnlessStopped
+	}
+	_, err := s.docker.ContainerUpdate(ctx, containerID, container.UpdateConfig{
+		RestartPolicy: container.RestartPolicy{Name: policy},
+	})
+	return err
 }
 
 var errNotFound = errors.New("not found")

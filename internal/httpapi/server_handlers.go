@@ -134,23 +134,30 @@ func (s *Server) serverCommand(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-	commandResult, err := s.engine.Command(r.Context(), serverID, input.Command)
+	restartRequested, err := s.store.MarkConsoleRestartIntent(
+		r.Context(), serverID, session.User.ID, input.Command,
+	)
 	if err != nil {
 		writeProblem(w, r, err)
 		return
 	}
-	intentionalShutdown, err := s.store.MarkIntentionalConsoleShutdown(
-		r.Context(), serverID, input.Command,
-	)
+	commandResult, err := s.engine.Command(r.Context(), serverID, input.Command)
 	if err != nil {
+		if restartRequested {
+			if cancelErr := s.store.CancelConsoleRestartIntent(
+				r.Context(), serverID, session.User.ID,
+			); cancelErr != nil {
+				s.logger.Error("cancel console restart intent failed", "server_id", serverID, "error", cancelErr)
+			}
+		}
 		writeProblem(w, r, err)
 		return
 	}
 	if err := s.store.RecordConsoleCommand(r.Context(), serverID, session.User.ID, len(input.Command)); err != nil {
 		s.logger.Error("record console command failed", "server_id", serverID, "error", err)
 	}
-	if intentionalShutdown {
-		s.logger.Info("intentional in-game shutdown command accepted", "server_id", serverID)
+	if restartRequested {
+		s.logger.Info("in-game restart command accepted", "server_id", serverID)
 	}
 	writeJSON(w, http.StatusOK, commandResult)
 }

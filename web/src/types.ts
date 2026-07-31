@@ -48,6 +48,52 @@ export type DiagnosticEntry = {
   created_at: string;
 };
 
+export type BuildInfo = {
+  version: string;
+  revision: string;
+  built_at: string;
+};
+
+export type PanelRelease = {
+  version: string;
+  tag: string;
+  name: string;
+  url: string;
+  notes: string;
+  prerelease: boolean;
+  published_at: string;
+};
+
+export type PanelUpdateStatus = {
+  id?: string;
+  state: "idle" | "queued" | "running" | "succeeded" | "failed";
+  phase?: string;
+  message?: string;
+  current_version?: string;
+  target_version?: string;
+  snapshot_path?: string;
+  failure_recovery?: string;
+  started_at?: string;
+  updated_at: string;
+  completed_at?: string;
+  error?: string;
+};
+
+export type PanelUpdate = {
+  build: BuildInfo;
+  check: {
+    repository: string;
+    checked_at: string;
+    current_version: string;
+    include_prereleases: boolean;
+    update_available: boolean;
+    updates_supported: boolean;
+    reason?: string;
+    latest?: PanelRelease;
+  };
+  status: PanelUpdateStatus;
+};
+
 export type SystemContainerLogs = {
   component: string;
   stdout: string;
@@ -467,9 +513,7 @@ export type ServerSummary = {
     | "unexpected_exit"
     | "startup_failure"
     | "health_failure"
-    | "recovery_exhausted"
     | null;
-  auto_recovery_enabled: boolean;
   recovery_attempts: number;
   container_id: string | null;
   image_reference: string;

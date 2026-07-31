@@ -522,7 +522,6 @@ func (s *Store) CommitServerSettings(
 	name, description string,
 	resources ServerResources,
 	containerID string,
-	autoRecoveryEnabled bool,
 ) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -532,10 +531,9 @@ func (s *Store) CommitServerSettings(
 	tag, err := tx.Exec(ctx, `
 		UPDATE servers
 		SET name = $3, description = $4, container_id = $5,
-		    auto_recovery_enabled = $6,
 		    version = version + 1, updated_at = now()
 		WHERE id = $1 AND version = $2 AND status = 'stopped' AND deleted_at IS NULL
-	`, serverID, expectedVersion, name, description, containerID, autoRecoveryEnabled)
+	`, serverID, expectedVersion, name, description, containerID)
 	if err != nil {
 		return err
 	}
@@ -557,7 +555,7 @@ func (s *Store) CommitServerSettings(
 	return addConfigurationActivity(
 		ctx, tx, serverID, actorID, "server.settings.updated",
 		"Server settings and resource limits updated",
-		map[string]any{"name": name, "auto_recovery_enabled": autoRecoveryEnabled},
+		map[string]any{"name": name},
 	)
 }
 

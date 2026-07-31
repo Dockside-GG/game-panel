@@ -5,7 +5,7 @@
 
 ## Choose a release or development installation
 
-- **Release installation:** download and extract a published release archive, then run the guided installer from that directory. Release installations use the version recorded in the archive.
+- **Release installation:** download and extract the versioned Dockside ZIP or TAR asset attached to a published release, then run the guided installer from that directory. Do not use GitHub's automatically generated source archive. Release installations use the immutable version recorded in `.dockside-release`.
 - **Development/contributor installation:** clone the source repository, run the guided installer to generate secrets, then start `compose.yml` with `compose.dev.yml` and `--build`.
 
 Do not use a moving source checkout as though it were a stable release. Development migrations and template normalization may change while the project is being tested.

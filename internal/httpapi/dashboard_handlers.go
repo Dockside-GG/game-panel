@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/dockside-gg/game-panel/internal/buildinfo"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -85,7 +86,10 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"build":   buildinfo.Current(),
+		"entries": entries,
+	})
 }
 
 func (s *Server) systemContainerLogs(w http.ResponseWriter, r *http.Request) {

@@ -104,7 +104,7 @@ The normal integrated UI is embedded into the Go application during the Docker b
 
 ## Database schema during early development
 
-Dockside has not released a stable schema. Update the existing base SQL under `internal/db/migrations` directly and recreate the disposable development PostgreSQL volume after schema changes. Do not add compatibility migrations, legacy fallbacks, or upgrade shims until the first released schema establishes an upgrade boundary.
+Until `v0.1.0-alpha.1` is published, update the existing base SQL under `internal/db/migrations` directly and recreate the disposable development PostgreSQL volume after schema changes. The first published alpha establishes the upgrade boundary: after it ships, freeze `0001_initial.sql` and add new forward-only migrations for every schema change. Do not rewrite migrations that have appeared in a release.
 
 Never place credentials or environment-specific values in schema SQL.
 
@@ -138,6 +138,9 @@ Read [Security](SECURITY.md) before changing authentication, secrets, uploads, a
 ## Release versus development
 
 Release archives and published container tags are immutable inputs for release installation. A development checkout builds `dev` images from local source through `compose.dev.yml`.
+
+The release packaging commands, container build metadata, acceptance matrix,
+and GitHub automation contract are documented in [Releasing Dockside](RELEASING.md).
 
 Do not present a source checkout as a stable release. Before publishing a release:
 

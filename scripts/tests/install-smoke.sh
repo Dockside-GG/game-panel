@@ -14,9 +14,12 @@ openssl() {
 export -f docker openssl
 
 prepare_case() {
-  local name="$1"
+  local name="$1" release_version="${2:-}"
   mkdir -p "$test_root/$name/scripts"
   cp "$source_root/scripts/install.sh" "$test_root/$name/scripts/install.sh"
+  if [[ -n "$release_version" ]]; then
+    printf '%s\n' "$release_version" > "$test_root/$name/.dockside-release"
+  fi
 }
 
 run_local_case() {
@@ -61,7 +64,18 @@ run_public_case() {
   )
 }
 
+run_release_case() {
+  prepare_case release 0.1.0-alpha.1
+  (
+    cd "$test_root/release"
+    printf '1\n18090\nhttp://localhost:18090\n123456789012345678\n\n\n\n' |
+      DOCKSIDE_INSTALL_DISCORD_CLIENT_SECRET='release-test-secret' bash scripts/install.sh >/dev/null
+    grep -Fx 'DOCKSIDE_VERSION=0.1.0-alpha.1' .env
+  )
+}
+
 run_local_case
 run_proxy_case
 run_public_case
+run_release_case
 printf 'Linux guided installer smoke tests passed.\n'

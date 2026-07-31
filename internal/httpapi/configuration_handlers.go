@@ -62,7 +62,6 @@ type updateSettingsRequest struct {
 	DiskLimitMB         *int64  `json:"disk_limit_mb"`
 	PidsLimit           *int    `json:"pids_limit"`
 	IOWeight            *int    `json:"io_weight"`
-	AutoRecoveryEnabled bool    `json:"auto_recovery_enabled"`
 }
 
 func (s *Server) serverConfiguration(w http.ResponseWriter, r *http.Request) {
@@ -334,7 +333,7 @@ func (s *Server) updateServerSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.CommitServerSettings(
 		r.Context(), serverID, session.User.ID, input.Version, input.Name,
-		input.Description, resources, result.ContainerID, input.AutoRecoveryEnabled,
+		input.Description, resources, result.ContainerID,
 	); err != nil {
 		s.rollbackRuntimeConfiguration(r, serverID, oldRequest, err)
 		writeProblem(w, r, err)

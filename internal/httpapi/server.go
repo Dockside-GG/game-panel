@@ -18,6 +18,7 @@ import (
 	"github.com/dockside-gg/game-panel/internal/secure"
 	"github.com/dockside-gg/game-panel/internal/store"
 	"github.com/dockside-gg/game-panel/internal/templates"
+	"github.com/dockside-gg/game-panel/internal/updates"
 	"github.com/dockside-gg/game-panel/internal/webui"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,6 +40,7 @@ type Server struct {
 	indexHTML []byte
 	box       *secure.Box
 	catalog   *templates.CatalogSyncer
+	updates   *updates.Checker
 }
 
 func New(
@@ -68,6 +70,7 @@ func New(
 		indexHTML: indexHTML,
 		box:       box,
 		catalog:   catalog,
+		updates:   updates.NewChecker(),
 	}, nil
 }
 
@@ -166,6 +169,9 @@ func (s *Server) Handler() http.Handler {
 			owner.With(s.requireCSRF).Put("/users/{userID}/server-access", s.setUserServerAccess)
 			owner.Get("/installation/settings", s.installationSettings)
 			owner.With(s.requireCSRF).Put("/installation/settings", s.updateInstallationSettings)
+			owner.Get("/installation/update", s.panelUpdate)
+			owner.With(s.requireCSRF).Post("/installation/update/check", s.checkPanelUpdate)
+			owner.With(s.requireCSRF).Post("/installation/update/apply", s.applyPanelUpdate)
 			owner.With(s.requireCSRF).Post("/system/containers/worker/restart", s.restartSystemWorker)
 		})
 	})

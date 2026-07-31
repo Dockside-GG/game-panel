@@ -23,28 +23,30 @@ func (s *Store) SyncRuntimeStats(ctx context.Context, snapshots []engineclient.S
 		}
 		observedServers[snapshot.ServerID] = true
 		var desiredState, previousStatus string
-		var autoRecovery bool
 		var recoveryAttempts int
 		var recoveryWindowStarted *time.Time
 		if err := tx.QueryRow(ctx, `
-			SELECT desired_state, status, auto_recovery_enabled,
-			       recovery_attempts, recovery_window_started_at
+			SELECT desired_state, status, recovery_attempts, recovery_window_started_at
 			FROM servers
 			WHERE id = $1 AND deleted_at IS NULL
 			FOR UPDATE
 		`, snapshot.ServerID).Scan(
-			&desiredState, &previousStatus, &autoRecovery,
-			&recoveryAttempts, &recoveryWindowStarted,
+			&desiredState, &previousStatus, &recoveryAttempts, &recoveryWindowStarted,
 		); err != nil {
 			continue
 		}
 		status := runtimeServerStatus(snapshot.State, desiredState, previousStatus)
 		var stopReason *string
 		running := status == "running"
+		stableRunning := running && snapshot.StartedAt != nil &&
+			snapshot.ObservedAt.Sub(*snapshot.StartedAt) >= 5*time.Minute
 		if status == "stopped" || (status == "stopping" && desiredState == "stopped") {
 			reason := "requested"
 			if desiredState == "running" {
 				reason = "unexpected_exit"
+				if previousStatus == "restarting" {
+					reason = "clean_exit"
+				}
 			}
 			stopReason = &reason
 		}
@@ -79,96 +81,92 @@ func (s *Store) SyncRuntimeStats(ctx context.Context, snapshots []engineclient.S
 			    updated_at = now(),
 			    version = CASE WHEN status <> $2 THEN version + 1 ELSE version END
 			WHERE id = $1
-		`, snapshot.ServerID, status, snapshot.ContainerID, stopReason, running); err != nil {
+		`, snapshot.ServerID, status, snapshot.ContainerID, stopReason, stableRunning); err != nil {
 			return fmt.Errorf("update observed server state for %s: %w", snapshot.ServerID, err)
 		}
-		unexpected := status == "stopped" && desiredState == "running"
-		if unexpected && previousStatus != "stopped" {
+		needsRecovery := status == "stopped" && desiredState == "running"
+		plannedRestart := needsRecovery && previousStatus == "restarting"
+		if needsRecovery && previousStatus != "stopped" {
 			eventID, err := identity.NewUUID()
 			if err != nil {
 				return err
+			}
+			eventType, severity, summary := "server.unexpected_exit", "error", "Server stopped unexpectedly"
+			if plannedRestart {
+				eventType, severity, summary = "server.restart.in_progress", "info", "Game process exited for restart"
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO activity_events(
 					id, server_id, event_type, severity, summary, data
 				)
-				VALUES ($1, $2, 'server.unexpected_exit', 'error', 'Server stopped unexpectedly', $3)
-			`, eventID, snapshot.ServerID, map[string]any{
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`, eventID, snapshot.ServerID, eventType, severity, summary, map[string]any{
 				"exit_code": snapshot.ExitCode,
 				"state":     snapshot.State,
 			}); err != nil {
 				return err
 			}
 		}
-		if unexpected && autoRecovery {
+		if needsRecovery {
 			now := snapshot.ObservedAt
-			if recoveryWindowStarted == nil || now.Sub(*recoveryWindowStarted) > 10*time.Minute {
+			if recoveryWindowStarted == nil {
 				recoveryAttempts = 0
 				recoveryWindowStarted = &now
 			}
-			if recoveryAttempts >= 5 {
-				if _, err := tx.Exec(ctx, `
-					UPDATE servers
-					SET desired_state = 'stopped', stop_reason = 'recovery_exhausted',
-					    recovery_not_before = NULL, updated_at = now(), version = version + 1
-					WHERE id = $1
-				`, snapshot.ServerID); err != nil {
-					return err
-				}
-				eventID, err := identity.NewUUID()
+			var pending bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM outbox_events
+					WHERE aggregate_id = $1 AND topic = 'server.recover'
+					  AND processed_at IS NULL
+				)
+			`, snapshot.ServerID).Scan(&pending); err != nil {
+				return err
+			}
+			if !pending {
+				attempt := nextRecoveryAttempt(recoveryAttempts)
+				delay := recoveryDelay(attempt)
+				payload, _ := json.Marshal(map[string]any{
+					"server_id": snapshot.ServerID, "attempt": attempt,
+				})
+				outboxID, err := identity.NewUUID()
 				if err != nil {
 					return err
 				}
 				if _, err := tx.Exec(ctx, `
-					INSERT INTO activity_events(
-						id, server_id, event_type, severity, summary, data
+					INSERT INTO outbox_events(
+						id, topic, aggregate_id, payload, available_at
 					)
-					VALUES (
-						$1, $2, 'server.recovery.exhausted', 'error',
-						'Automatic recovery stopped after five attempts',
-						jsonb_build_object('attempts', 5)
-					)
-				`, eventID, snapshot.ServerID); err != nil {
+					VALUES ($1, 'server.recover', $2, $3, now() + $4::interval)
+				`, outboxID, snapshot.ServerID, payload,
+					fmt.Sprintf("%d seconds", int(delay.Seconds()))); err != nil {
 					return err
 				}
-			} else {
-				var pending bool
-				if err := tx.QueryRow(ctx, `
-					SELECT EXISTS(
-						SELECT 1 FROM outbox_events
-						WHERE aggregate_id = $1 AND topic = 'server.recover'
-						  AND processed_at IS NULL
-					)
-				`, snapshot.ServerID).Scan(&pending); err != nil {
+				if _, err := tx.Exec(ctx, `
+					UPDATE servers
+					SET recovery_attempts = $2,
+					    recovery_window_started_at = $3,
+					    recovery_not_before = now() + $4::interval
+					WHERE id = $1
+				`, snapshot.ServerID, attempt, recoveryWindowStarted,
+					fmt.Sprintf("%d seconds", int(delay.Seconds()))); err != nil {
 					return err
 				}
-				if !pending {
-					attempt := recoveryAttempts + 1
-					delay := recoveryDelay(attempt)
-					payload, _ := json.Marshal(map[string]any{
-						"server_id": snapshot.ServerID, "attempt": attempt,
-					})
-					outboxID, err := identity.NewUUID()
+				if attempt == 5 && recoveryAttempts < 5 {
+					eventID, err := identity.NewUUID()
 					if err != nil {
 						return err
 					}
 					if _, err := tx.Exec(ctx, `
-						INSERT INTO outbox_events(
-							id, topic, aggregate_id, payload, available_at
+						INSERT INTO activity_events(
+							id, server_id, event_type, severity, summary, data
 						)
-						VALUES ($1, 'server.recover', $2, $3, now() + $4::interval)
-					`, outboxID, snapshot.ServerID, payload,
-						fmt.Sprintf("%d seconds", int(delay.Seconds()))); err != nil {
-						return err
-					}
-					if _, err := tx.Exec(ctx, `
-						UPDATE servers
-						SET recovery_attempts = $2,
-						    recovery_window_started_at = $3,
-						    recovery_not_before = now() + $4::interval
-						WHERE id = $1
-					`, snapshot.ServerID, attempt, recoveryWindowStarted,
-						fmt.Sprintf("%d seconds", int(delay.Seconds()))); err != nil {
+						VALUES (
+							$1, $2, 'server.recovery.persistent', 'warning',
+							'Server entered persistent recovery mode',
+							jsonb_build_object('attempt', 5, 'retry_seconds', $3::integer)
+						)
+					`, eventID, snapshot.ServerID, int(delay.Seconds())); err != nil {
 						return err
 					}
 				}
@@ -305,4 +303,14 @@ func recoveryDelay(attempt int) time.Duration {
 		attempt = len(delays)
 	}
 	return delays[attempt-1]
+}
+
+func nextRecoveryAttempt(current int) int {
+	if current < 0 {
+		return 1
+	}
+	if current >= 5 {
+		return 5
+	}
+	return current + 1
 }

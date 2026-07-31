@@ -2773,7 +2773,6 @@ function ServerGeneralSettingsEditor({ server, data }: { server: ServerSummary; 
     disk: mb(data.resources.disk_limit_bytes),
     pids: data.resources.pids_limit == null ? "" : String(data.resources.pids_limit),
     ioWeight: data.resources.io_weight == null ? "" : String(data.resources.io_weight),
-    autoRecovery: server.auto_recovery_enabled,
   });
   const optionalNumber = (value: string) => value.trim() === "" ? null : Number(value);
   const save = useMutation({
@@ -2792,7 +2791,6 @@ function ServerGeneralSettingsEditor({ server, data }: { server: ServerSummary; 
           disk_limit_mb: optionalNumber(form.disk),
           pids_limit: optionalNumber(form.pids),
           io_weight: optionalNumber(form.ioWeight),
-          auto_recovery_enabled: form.autoRecovery,
         }),
       });
     },
@@ -2802,7 +2800,7 @@ function ServerGeneralSettingsEditor({ server, data }: { server: ServerSummary; 
       void queryClient.invalidateQueries({ queryKey: ["servers"] });
     },
   });
-  const set = (name: Exclude<keyof typeof form, "autoRecovery">, value: string) =>
+  const set = (name: keyof typeof form, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
   return (
     <section className="panel configuration-form general-settings">
@@ -2823,14 +2821,7 @@ function ServerGeneralSettingsEditor({ server, data }: { server: ServerSummary; 
         <label>I/O weight<input type="number" min={10} max={1000} value={form.ioWeight} placeholder="Docker default" onChange={(event) => set("ioWeight", event.target.value)} /></label>
       </div>
       <p className="fine-print">Blank limits are unlimited. Disk limits are monitored thresholds because portable Docker named volumes do not provide a consistent hard quota across Windows and Linux.</p>
-      <label className="toggle-row">
-        <input
-          type="checkbox"
-          checked={form.autoRecovery}
-          onChange={(event) => setForm((current) => ({ ...current, autoRecovery: event.target.checked }))}
-        />
-        <span><strong>Automatic recovery</strong><small>Restart this server after an unexpected stop, using bounded backoff.</small></span>
-      </label>
+      <div className="notice info"><RotateCw size={16} /> Running servers are always supervised and restart automatically after a clean exit or crash. Use Stop or Kill to keep this server offline.</div>
       <button className="button primary" disabled={save.isPending || server.status !== "stopped" || form.name.trim().length < 2} onClick={() => save.mutate()}>
         <Save size={15} /> {save.isPending ? "Replacing container..." : "Apply settings"}
       </button>

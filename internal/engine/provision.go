@@ -311,7 +311,7 @@ func (s *Server) replaceRuntimeContainer(
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges:true"},
 			ReadonlyRootfs: false,
-			RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
+			RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 			LogConfig: container.LogConfig{
 				Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"},
 			},
@@ -447,7 +447,7 @@ func (s *Server) createServerResources(ctx context.Context, serverID string, inp
 		CapDrop:        []string{"ALL"},
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		ReadonlyRootfs: false,
-		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
+		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		LogConfig: container.LogConfig{
 			Type:   "json-file",
 			Config: map[string]string{"max-size": "10m", "max-file": "3"},

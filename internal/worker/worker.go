@@ -288,25 +288,24 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 			return nil
 		}
 		recoveryErr := w.engine.Power(ctx, payload.ServerID, "start")
+		stillDesired, err := w.store.RecoveryStillDesired(ctx, payload.ServerID)
+		if err != nil {
+			return fmt.Errorf("verify server recovery intent: %w", err)
+		}
+		if !stillDesired {
+			if recoveryErr == nil {
+				if stopErr := w.engine.Power(ctx, payload.ServerID, "stop"); stopErr != nil {
+					return fmt.Errorf("stop cancelled server recovery: %w", stopErr)
+				}
+			}
+			return nil
+		}
 		if err := w.store.FinishRecovery(
 			ctx, payload.ServerID, payload.Attempt, recoveryErr,
 		); err != nil {
 			return fmt.Errorf("finish server recovery: %w", err)
 		}
 		return nil
-	case "server.enforce_stop":
-		var payload struct {
-			ServerID string `json:"server_id"`
-		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return fmt.Errorf("decode enforced stop event: %w", err)
-		}
-		pending, err := w.store.IntentionalStopPending(ctx, payload.ServerID)
-		if err != nil || !pending {
-			return err
-		}
-		stopErr := w.engine.Power(ctx, payload.ServerID, "stop")
-		return w.store.FinishIntentionalStop(ctx, payload.ServerID, stopErr)
 	case "server.template_update":
 		var job store.TemplateUpdateJob
 		if err := json.Unmarshal(event.Payload, &job); err != nil {

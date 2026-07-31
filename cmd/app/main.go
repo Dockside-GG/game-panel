@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dockside-gg/game-panel/internal/buildinfo"
 	"github.com/dockside-gg/game-panel/internal/config"
 	"github.com/dockside-gg/game-panel/internal/db"
 	"github.com/dockside-gg/game-panel/internal/engineclient"
@@ -29,7 +30,13 @@ func main() {
 		slog.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	logger := logging.New(cfg.LogLevel).With("component", "app", "instance_id", cfg.InstanceID)
+	build := buildinfo.Current()
+	logger := logging.New(cfg.LogLevel).With(
+		"component", "app",
+		"instance_id", cfg.InstanceID,
+		"version", build.Version,
+		"revision", build.Revision,
+	)
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

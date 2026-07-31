@@ -96,6 +96,29 @@ type SystemContainerLogs struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 
+type PanelUpdateRequest struct {
+	CurrentVersion string `json:"current_version"`
+	TargetVersion  string `json:"target_version"`
+	ReleaseURL     string `json:"release_url"`
+	ArchiveURL     string `json:"archive_url"`
+	ChecksumsURL   string `json:"checksums_url"`
+}
+
+type PanelUpdateStatus struct {
+	ID              string     `json:"id,omitempty"`
+	State           string     `json:"state"`
+	Phase           string     `json:"phase,omitempty"`
+	Message         string     `json:"message,omitempty"`
+	CurrentVersion  string     `json:"current_version,omitempty"`
+	TargetVersion   string     `json:"target_version,omitempty"`
+	SnapshotPath    string     `json:"snapshot_path,omitempty"`
+	FailureRecovery string     `json:"failure_recovery,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	Error           string     `json:"error,omitempty"`
+}
+
 type Port struct {
 	HostIP        string `json:"host_ip"`
 	HostPort      int    `json:"host_port"`
@@ -253,6 +276,22 @@ func (c *Client) SystemContainerLogs(
 
 func (c *Client) RestartWorker(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/system/containers/worker/restart", struct{}{}, nil)
+}
+
+func (c *Client) PanelUpdateStatus(ctx context.Context) (PanelUpdateStatus, error) {
+	var result PanelUpdateStatus
+	if err := c.do(ctx, http.MethodGet, "/v1/system/update", nil, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (c *Client) ApplyPanelUpdate(ctx context.Context, input PanelUpdateRequest) (PanelUpdateStatus, error) {
+	var result PanelUpdateStatus
+	if err := c.do(ctx, http.MethodPost, "/v1/system/update", input, &result); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (c *Client) Power(ctx context.Context, serverID, action string) error {

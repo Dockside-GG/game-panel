@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+/.dockside-release
 *.local
 secrets/
 *.pem

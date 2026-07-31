@@ -170,9 +170,8 @@ CREATE TABLE servers (
     stop_reason text
         CHECK (stop_reason IS NULL OR stop_reason IN (
             'requested', 'clean_exit', 'unexpected_exit', 'startup_failure',
-            'health_failure', 'recovery_exhausted'
+            'health_failure'
         )),
-    auto_recovery_enabled boolean NOT NULL DEFAULT true,
     recovery_attempts integer NOT NULL DEFAULT 0
         CHECK (recovery_attempts BETWEEN 0 AND 5),
     recovery_window_started_at timestamptz,

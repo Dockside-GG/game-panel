@@ -71,7 +71,6 @@ type ServerSummary struct {
 	Status            string          `json:"status"`
 	DesiredState      string          `json:"desired_state"`
 	StopReason        *string         `json:"stop_reason"`
-	AutoRecovery      bool            `json:"auto_recovery_enabled"`
 	RecoveryAttempts  int             `json:"recovery_attempts"`
 	ContainerID       *string         `json:"container_id"`
 	ImageReference    string          `json:"image_reference"`
@@ -364,7 +363,7 @@ func (s *Store) ServerByID(ctx context.Context, serverID string) (ServerSummary,
 const serverSelect = `
 	SELECT
 		s.id, s.name, s.description, s.status, s.desired_state, s.stop_reason,
-		s.auto_recovery_enabled, s.recovery_attempts, s.container_id,
+		s.recovery_attempts, s.container_id,
 		s.image_reference, t.name, t.slug, tv.id, tv.version,
 		p.id, host(p.bind_address), p.host_port, p.container_port, p.protocol,
 		COALESCE(p.purpose, ''), COALESCE(p.environment, ''), p.is_primary,
@@ -402,7 +401,7 @@ func scanServer(row rowScanner) (ServerSummary, error) {
 	var primary *bool
 	err := row.Scan(
 		&item.ID, &item.Name, &item.Description, &item.Status, &item.DesiredState,
-		&item.StopReason, &item.AutoRecovery, &item.RecoveryAttempts,
+		&item.StopReason, &item.RecoveryAttempts,
 		&item.ContainerID, &item.ImageReference, &item.TemplateName,
 		&item.TemplateSlug, &item.TemplateVersionID, &item.TemplateVersion,
 		&portID, &bindAddress, &hostPort, &containerPort, &protocol, &purpose,
@@ -842,10 +841,22 @@ func (s *Store) requestPower(
 		UPDATE servers
 		SET status = $2, desired_state = $3,
 		    stop_reason = CASE WHEN $3 = 'stopped' THEN 'requested' ELSE NULL END,
+		    recovery_attempts = 0, recovery_window_started_at = NULL,
+		    recovery_not_before = NULL,
 		    updated_at = now(), version = version + 1
 		WHERE id = $1 AND deleted_at IS NULL
 	`, serverID, transition, desired); err != nil {
 		return "", err
+	}
+	if desired == "stopped" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE outbox_events
+			SET processed_at = now(), last_error = 'cancelled by explicit stop intent'
+			WHERE aggregate_id = $1 AND topic = 'server.recover'
+			  AND processed_at IS NULL
+		`, serverID); err != nil {
+			return "", err
+		}
 	}
 	operationID, err := identity.NewUUID()
 	if err != nil {
@@ -989,13 +1000,28 @@ func (s *Store) BeginRecovery(ctx context.Context, serverID string, attempt int)
 		WHERE id = $1 AND deleted_at IS NULL
 		  AND desired_state = 'running'
 		  AND status = 'stopped'
-		  AND auto_recovery_enabled
 		  AND recovery_attempts = $2
 	`, serverID, attempt)
 	if err != nil {
 		return false, err
 	}
 	return command.RowsAffected() == 1, nil
+}
+
+func (s *Store) RecoveryStillDesired(
+	ctx context.Context,
+	serverID string,
+) (bool, error) {
+	var desired bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT desired_state = 'running'
+		FROM servers
+		WHERE id = $1 AND deleted_at IS NULL
+	`, serverID).Scan(&desired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return desired, err
 }
 
 func (s *Store) FinishRecovery(
@@ -1050,9 +1076,9 @@ func (s *Store) FinishRecovery(
 	return tx.Commit(ctx)
 }
 
-func (s *Store) MarkIntentionalConsoleShutdown(
+func (s *Store) MarkConsoleRestartIntent(
 	ctx context.Context,
-	serverID, command string,
+	serverID, actorID, command string,
 ) (bool, error) {
 	var stopCommand string
 	err := s.pool.QueryRow(ctx, `
@@ -1067,14 +1093,7 @@ func (s *Store) MarkIntentionalConsoleShutdown(
 	if err != nil {
 		return false, err
 	}
-	expected := strings.Fields(strings.ToLower(strings.TrimSpace(stopCommand)))
-	actual := strings.Fields(strings.ToLower(strings.TrimSpace(command)))
-	if len(expected) == 0 || len(actual) == 0 || expected[0] != actual[0] {
-		return false, nil
-	}
-	switch expected[0] {
-	case "shutdown", "quit", "exit", "stop", "saveandexit":
-	default:
+	if !matchesTemplateStopCommand(stopCommand, command) {
 		return false, nil
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1082,29 +1101,78 @@ func (s *Store) MarkIntentionalConsoleShutdown(
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `
+	commandTag, err := tx.Exec(ctx, `
 		UPDATE servers
-		SET status = 'stopping', desired_state = 'stopped',
-		    stop_reason = 'requested', updated_at = now(), version = version + 1
-		WHERE id = $1 AND deleted_at IS NULL
-	`, serverID); err != nil {
-		return false, err
-	}
-	outboxID, err := identity.NewUUID()
+		SET status = 'restarting', stop_reason = NULL,
+		    updated_at = now(), version = version + 1
+		WHERE id = $1 AND deleted_at IS NULL AND desired_state = 'running'
+	`, serverID)
 	if err != nil {
 		return false, err
 	}
-	payload, _ := json.Marshal(map[string]string{"server_id": serverID})
+	if commandTag.RowsAffected() != 1 {
+		return false, nil
+	}
+	eventID, err := identity.NewUUID()
+	if err != nil {
+		return false, err
+	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO outbox_events(id, topic, aggregate_id, payload, available_at)
-		VALUES ($1, 'server.enforce_stop', $2, $3, now() + interval '30 seconds')
-	`, outboxID, serverID, payload); err != nil {
+		INSERT INTO activity_events(
+			id, server_id, actor_user_id, event_type, severity, summary, data
+		)
+		VALUES (
+			$1, $2, $3, 'server.restart.console_requested', 'info',
+			'Restart requested through the game console',
+			jsonb_build_object('transport', 'console')
+		)
+	`, eventID, serverID, actorID); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func matchesTemplateStopCommand(templateCommand, actualCommand string) bool {
+	expected := strings.Fields(strings.ToLower(strings.TrimSpace(templateCommand)))
+	actual := strings.Fields(strings.ToLower(strings.TrimSpace(actualCommand)))
+	return len(expected) > 0 && len(actual) > 0 && expected[0] == actual[0]
+}
+
+func (s *Store) CancelConsoleRestartIntent(
+	ctx context.Context,
+	serverID, actorID string,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE servers
+		SET status = 'running', updated_at = now(), version = version + 1
+		WHERE id = $1 AND desired_state = 'running' AND status = 'restarting'
+	`, serverID); err != nil {
+		return err
+	}
+	eventID, err := identity.NewUUID()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO activity_events(
+			id, server_id, actor_user_id, event_type, severity, summary, data
+		)
+		VALUES (
+			$1, $2, $3, 'server.restart.console_failed', 'error',
+			'Game console restart command was not delivered', '{}'::jsonb
+		)
+	`, eventID, serverID, actorID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) ServerCommandReady(ctx context.Context, serverID string) (bool, error) {
@@ -1118,37 +1186,6 @@ func (s *Store) ServerCommandReady(ctx context.Context, serverID string) (bool, 
 		return false, ErrNotFound
 	}
 	return ready, err
-}
-
-func (s *Store) IntentionalStopPending(ctx context.Context, serverID string) (bool, error) {
-	var pending bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT desired_state = 'stopped' AND status = 'stopping'
-		FROM servers
-		WHERE id = $1 AND deleted_at IS NULL
-	`, serverID).Scan(&pending)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return pending, err
-}
-
-func (s *Store) FinishIntentionalStop(ctx context.Context, serverID string, stopErr error) error {
-	if stopErr != nil {
-		_, err := s.pool.Exec(ctx, `
-			UPDATE servers
-			SET status = 'failed', updated_at = now(), version = version + 1
-			WHERE id = $1 AND desired_state = 'stopped'
-		`, serverID)
-		return err
-	}
-	_, err := s.pool.Exec(ctx, `
-		UPDATE servers
-		SET status = 'stopped', stop_reason = 'requested',
-		    updated_at = now(), version = version + 1
-		WHERE id = $1 AND desired_state = 'stopped'
-	`, serverID)
-	return err
 }
 
 func truncateStoreError(value string, maximum int) string {

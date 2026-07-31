@@ -9,6 +9,8 @@ import {
   Clock3,
   Copy,
   Cpu,
+  Download,
+  ExternalLink,
   FileWarning,
   Eye,
   EyeOff,
@@ -16,6 +18,7 @@ import {
   Info,
   KeyRound,
   MemoryStick,
+  PackageCheck,
   Plus,
   RotateCw,
   Server,
@@ -46,6 +49,7 @@ import {
   UserAvatar,
 } from "./components";
 import type {
+  BuildInfo,
   Dashboard,
   Invite,
   Session,
@@ -54,6 +58,7 @@ import type {
   SystemContainer,
   SystemContainerLogs,
   DiagnosticEntry,
+  PanelUpdate,
   User,
 } from "./types";
 import { serverPresentation } from "./server-presentation";
@@ -965,6 +970,7 @@ function PanelSettingsPage() {
     <>
       <PageHeader eyebrow="INSTALLATION" title="Panel settings" description="Review the fixed installation origin and configure Discord security policy." />
       {installation.data && <MFASettings policy={installation.data.mfa_policy} />}
+      <PanelUpdateSettings />
       <section className="panel installation-details">
         <div className="panel-heading"><div><span className="eyebrow">AUTHENTICATION</span><h2>Discord OAuth2 application</h2></div><StatusBadge tone="success">identify only</StatusBadge></div>
         <dl className="host-details">
@@ -1001,6 +1007,122 @@ function PanelSettingsPage() {
         The public URL is selected during installation because it defines trusted browser origins, cookie security, and reverse-proxy routing. Discord credentials can be rotated above without restarting the panel.
       </section>
     </>
+  );
+}
+
+function PanelUpdateSettings() {
+  const queryClient = useQueryClient();
+  const [includePrereleases, setIncludePrereleases] = useState(true);
+  const update = useQuery({
+    queryKey: ["panel-update", includePrereleases],
+    queryFn: () => api<PanelUpdate>(`/api/v1/installation/update?include_prereleases=${includePrereleases}`),
+    refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 3_000 : 60_000,
+    retry: (count, error) => count < 12 && error instanceof ApiError && error.status >= 500,
+  });
+  const check = useMutation({
+    mutationFn: () => api<PanelUpdate>("/api/v1/installation/update/check", {
+      method: "POST",
+      body: JSON.stringify({ include_prereleases: includePrereleases }),
+    }),
+    onSuccess: (result) => queryClient.setQueryData(["panel-update", includePrereleases], result),
+  });
+  const apply = useMutation({
+    mutationFn: (version: string) => api<PanelUpdate["status"]>("/api/v1/installation/update/apply", {
+      method: "POST",
+      body: JSON.stringify({ version, include_prereleases: includePrereleases }),
+    }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["panel-update"] });
+    },
+  });
+  const data = update.data;
+  const active = ["queued", "running"].includes(data?.status.state ?? "");
+  const latest = data?.check.latest;
+  const canApply = Boolean(data?.check.updates_supported && data.check.update_available && latest && !active && !apply.isPending);
+  const requestUpdate = () => {
+    if (!latest) return;
+    const warning = [
+      `Update Dockside from ${data?.build.version ?? "the current version"} to ${latest.version}?`,
+      "",
+      "The panel, worker, and running game servers will be stopped temporarily.",
+      "Dockside will first create one local pre-update recovery snapshot containing panel configuration and secrets, PostgreSQL, managed container images/configuration, system volumes, and all managed game-server volumes.",
+      "",
+      "Do not power off the host during this operation.",
+    ].join("\n");
+    if (window.confirm(warning)) apply.mutate(latest.version);
+  };
+  const statusTone: "danger" | "success" | "warning" | "info" = data?.status.state === "failed"
+    ? "danger"
+    : data?.status.state === "succeeded"
+      ? "success"
+      : active
+        ? "warning"
+        : "info";
+  return (
+    <section className="panel panel-update-settings">
+      <div className="panel-heading">
+        <div><span className="eyebrow">SOFTWARE</span><h2>Panel version & updates</h2></div>
+        <StatusBadge tone={statusTone}>{active ? data?.status.phase ?? "updating" : data?.status.state ?? "checking"}</StatusBadge>
+      </div>
+      {update.isLoading ? <TableLoading /> : update.isError ? (
+        <div className="panel-update-body"><ErrorPanel error={update.error} retry={() => void update.refetch()} /></div>
+      ) : data ? (
+        <div className="panel-update-body">
+          <div className="panel-update-version">
+            <span className="panel-update-icon"><PackageCheck size={24} /></span>
+            <div>
+              <span>Running version</span>
+              <strong>{data.build.version}</strong>
+              <small>Revision {data.build.revision === "unknown" ? "not embedded" : data.build.revision.slice(0, 12)} · Built {data.build.built_at === "unknown" ? "from source" : formatDate(data.build.built_at)}</small>
+            </div>
+          </div>
+          <div className="panel-update-controls">
+            <label className="checkbox-row">
+              <input type="checkbox" checked={includePrereleases} disabled={active} onChange={(event) => setIncludePrereleases(event.target.checked)} />
+              <span>Include alpha, beta, and release-candidate updates</span>
+            </label>
+            <button type="button" className="button secondary" disabled={check.isPending || active} onClick={() => check.mutate()}>
+              <RotateCw size={16} className={check.isPending ? "spin" : undefined} /> {check.isPending ? "Checking…" : "Check for updates"}
+            </button>
+          </div>
+          {!data.check.updates_supported ? (
+            <div className="notice warning">{data.check.reason}</div>
+          ) : latest ? (
+            <div className={`panel-release-card ${data.check.update_available ? "available" : ""}`}>
+              <div>
+                <span>{data.check.update_available ? "Update available" : "Latest published release"}</span>
+                <strong>{latest.name}</strong>
+                <small>{latest.prerelease ? "Pre-release" : "Stable"} · Published {formatDate(latest.published_at)}</small>
+              </div>
+              <div className="panel-release-actions">
+                <a className="button ghost" href={latest.url} target="_blank" rel="noreferrer">Release notes <ExternalLink size={15} /></a>
+                {data.check.update_available && (
+                  <button type="button" className="button primary" disabled={!canApply} onClick={requestUpdate}>
+                    <Download size={16} /> {apply.isPending ? "Starting…" : `Update to ${latest.version}`}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="notice info">No complete Dockside release with a signed archive and checksums is published for this channel.</div>
+          )}
+          {(active || data.status.state === "failed" || data.status.state === "succeeded") && (
+            <div className={`panel-update-progress ${data.status.state}`}>
+              <div><strong>{data.status.message || "Update status"}</strong><StatusBadge tone={statusTone}>{data.status.phase || data.status.state}</StatusBadge></div>
+              {active && <span className="indeterminate-progress"><i /></span>}
+              <small>Target {data.status.target_version || "—"} · Last update {formatDate(data.status.updated_at)}</small>
+              {data.status.snapshot_path && <small>Recovery snapshot: <code>{data.status.snapshot_path}</code></small>}
+              {data.status.error && <div className="form-error">{data.status.error}</div>}
+              {data.status.failure_recovery && <div className="notice warning">{data.status.failure_recovery}</div>}
+            </div>
+          )}
+          {apply.isError && <div className="form-error">{apply.error.message}</div>}
+          <p className="panel-update-footnote">
+            The updater accepts only published Dockside.GG GitHub releases, validates the versioned ZIP against <code>SHA256SUMS</code>, and retains exactly one completed pre-update snapshot. Existing game backups are left in place.
+          </p>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1075,7 +1197,7 @@ function DiagnosticsPage() {
   const [component, setComponent] = useState("app");
   const diagnostics = useQuery({
     queryKey: ["diagnostics"],
-    queryFn: () => api<{ entries: DiagnosticEntry[] }>("/api/v1/diagnostics?limit=250"),
+    queryFn: () => api<{ build: BuildInfo; entries: DiagnosticEntry[] }>("/api/v1/diagnostics?limit=250"),
     enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? ""),
     refetchInterval: 15_000,
   });
@@ -1114,6 +1236,16 @@ function DiagnosticsPage() {
           void logs.refetch();
         }}><RotateCw size={15} /> Refresh</button>}
       />
+      {diagnostics.data?.build && (
+        <section className="panel">
+          <div className="panel-heading"><div><span className="eyebrow">BUILD</span><h2>Dockside release</h2></div><StatusBadge tone={diagnostics.data.build.version === "dev" ? "warning" : "success"}>{diagnostics.data.build.version}</StatusBadge></div>
+          <dl className="detail-list">
+            <div><dt>Version</dt><dd>{diagnostics.data.build.version}</dd></div>
+            <div><dt>Revision</dt><dd className="mono">{diagnostics.data.build.revision}</dd></div>
+            <div><dt>Built</dt><dd>{diagnostics.data.build.built_at === "unknown" ? "Development build" : diagnostics.data.build.built_at}</dd></div>
+          </dl>
+        </section>
+      )}
       <div className="diagnostics-layout">
         <section className="panel">
           <div className="panel-heading"><div><span className="eyebrow">CONTROL PLANE</span><h2>Operational failures</h2></div><StatusBadge tone={diagnostics.data?.entries.length ? "warning" : "success"}>{diagnostics.data?.entries.length ?? 0} recent</StatusBadge></div>

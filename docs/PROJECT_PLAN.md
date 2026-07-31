@@ -16,8 +16,8 @@ the project can be recommended for production.
   explanations, game-server resource meters, recent restore state, and audit
   history.
 - Server lifecycle controls for start, graceful stop, restart, and immediate
-  kill, with durable transitional states and automatic recovery after an
-  unexpected stop.
+  kill, with durable transitional states, Docker restart protection, and
+  persistent desired-state recovery after clean or unexpected exits.
 - Live installation and runtime output, plus template-defined stdin, RCON, HTTP
   REST, or disabled command transports.
 - File and folder browsing, drag-and-drop upload, rename, text editing, and
@@ -62,6 +62,9 @@ the project can be recommended for production.
    disposable development infrastructure is recreated. Compatibility
    migrations and legacy fallbacks begin only after a released upgrade
    boundary exists.
+8. A running request is durable. Only an explicit panel Stop or Kill action may
+   leave a game server offline; clean exits, crashes, and template-declared
+   console shutdown commands remain supervised and restart automatically.
 
 ## Template catalog boundary
 
