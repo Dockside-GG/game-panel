@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/dockside-gg/game-panel/internal/config"
-	"github.com/dockside-gg/game-panel/internal/discord"
 	"github.com/dockside-gg/game-panel/internal/engineclient"
 	"github.com/dockside-gg/game-panel/internal/secure"
 	"github.com/dockside-gg/game-panel/internal/store"
+	"github.com/dockside-gg/game-panel/internal/templates"
+	"github.com/dockside-gg/game-panel/internal/updates"
 	"github.com/dockside-gg/game-panel/internal/webui"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,12 +34,13 @@ type Server struct {
 	cfg       config.Config
 	store     *store.Store
 	pool      *pgxpool.Pool
-	discord   *discord.Client
 	engine    *engineclient.Client
 	logger    *slog.Logger
 	webFS     fs.FS
 	indexHTML []byte
 	box       *secure.Box
+	catalog   *templates.CatalogSyncer
+	updates   *updates.Checker
 }
 
 func New(
@@ -46,6 +48,7 @@ func New(
 	dataStore *store.Store,
 	pool *pgxpool.Pool,
 	engine *engineclient.Client,
+	catalog *templates.CatalogSyncer,
 	logger *slog.Logger,
 ) (*Server, error) {
 	webFS := webui.FS()
@@ -53,7 +56,6 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	redirectURI := cfg.PublicURL.String() + "/api/v1/auth/discord/callback"
 	box, err := secure.NewBox(cfg.EncryptionKey)
 	if err != nil {
 		return nil, err
@@ -62,12 +64,13 @@ func New(
 		cfg:       cfg,
 		store:     dataStore,
 		pool:      pool,
-		discord:   discord.New(cfg.DiscordClientID, cfg.DiscordClientSecret, redirectURI),
 		engine:    engine,
 		logger:    logger,
 		webFS:     webFS,
 		indexHTML: indexHTML,
 		box:       box,
+		catalog:   catalog,
+		updates:   updates.NewChecker(),
 	}, nil
 }
 
@@ -94,9 +97,14 @@ func (s *Server) Handler() http.Handler {
 			active.Get("/dashboard", s.dashboard)
 			active.Get("/host", s.hostStatus)
 			active.With(s.requireAdministrator).Get("/system/containers", s.listSystemContainers)
+			active.With(s.requireAdministrator).Get("/system/containers/{component}/logs", s.systemContainerLogs)
+			active.With(s.requireAdministrator).Get("/diagnostics", s.diagnostics)
 			active.Get("/templates", s.listTemplates)
 			active.Get("/templates/facets", s.templateFacets)
+			active.Get("/templates/catalog", s.templateCatalogStatus)
+			active.With(s.requireAdministrator, s.requireCSRF).Post("/templates/catalog/sync", s.syncTemplateCatalog)
 			active.Get("/templates/{versionID}", s.templateDetail)
+			active.Get("/templates/{versionID}/export", s.exportTemplate)
 			active.With(s.requireCSRF).Post("/templates/import", s.importTemplate)
 			active.With(s.requireCSRF).Post("/templates/{versionID}/fork", s.forkTemplate)
 			active.With(s.requireCSRF).Delete("/templates/{templateID}", s.archiveTemplate)
@@ -106,6 +114,8 @@ func (s *Server) Handler() http.Handler {
 			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/configuration", s.serverConfiguration)
 			active.With(s.requireServerPermission("server.startup.manage"), s.requireCSRF).Put("/servers/{serverID}/startup", s.updateServerStartup)
 			active.With(s.requireServerPermission("server.startup.manage"), s.requireCSRF).Post("/servers/{serverID}/template", s.createTemplateFromServer)
+			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/template-update", s.serverTemplateUpdateStatus)
+			active.With(s.requireServerPermission("server.startup.manage"), s.requireCSRF).Post("/servers/{serverID}/template-update", s.updateServerTemplate)
 			active.With(s.requireServerPermission("server.network.manage"), s.requireCSRF).Put("/servers/{serverID}/network", s.updateServerNetwork)
 			active.With(s.requireServerPermission("server.resources.manage"), s.requireCSRF).Put("/servers/{serverID}/settings", s.updateServerSettings)
 			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/activity", s.serverActivity)
@@ -114,15 +124,18 @@ func (s *Server) Handler() http.Handler {
 			active.With(s.requireServerPermission("server.files.read")).Get("/servers/{serverID}/files", s.listServerFiles)
 			active.With(s.requireServerPermission("server.files.read")).Get("/servers/{serverID}/files/download", s.downloadServerFile)
 			active.With(s.requireServerPermission("server.files.delete"), s.requireCSRF).Delete("/servers/{serverID}/files", s.deleteServerFile)
+			active.With(s.requireServerPermission("server.files.write"), s.requireCSRF).Patch("/servers/{serverID}/files", s.renameServerFile)
 			active.With(s.requireServerPermission("server.files.read")).Get("/servers/{serverID}/files/content", s.readServerFile)
 			active.With(s.requireServerPermission("server.files.write"), s.requireCSRF).Put("/servers/{serverID}/files/content", s.writeServerFile)
 			active.With(s.requireServerPermission("server.files.write"), s.requireCSRF).Post("/servers/{serverID}/files/upload", s.uploadServerFile)
 			active.With(s.requireServerPermission("server.files.write"), s.requireCSRF).Post("/servers/{serverID}/files/directories", s.createServerDirectory)
 			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/backups", s.listBackups)
+			active.With(s.requireServerPermission("server.backups.download")).Get("/servers/{serverID}/backups/{backupID}/download", s.downloadBackup)
 			active.With(s.requireServerPermission("server.backups.manage"), s.requireCSRF).Post("/servers/{serverID}/backups", s.createBackup)
 			active.With(s.requireServerPermission("server.backups.manage"), s.requireCSRF).Patch("/servers/{serverID}/backups/{backupID}", s.lockBackup)
 			active.With(s.requireServerPermission("server.backups.manage"), s.requireCSRF).Delete("/servers/{serverID}/backups/{backupID}", s.deleteBackup)
 			active.With(s.requireServerPermission("server.backups.restore"), s.requireCSRF).Post("/servers/{serverID}/backups/{backupID}/restore", s.restoreBackup)
+			active.With(s.requireServerPermission("server.backups.manage"), s.requireCSRF).Post("/servers/{serverID}/backups/{backupID}/deliveries/{deliveryID}/retry", s.retryBackupDelivery)
 			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/databases", s.listServerDatabases)
 			active.With(s.requireServerPermission("server.databases.manage"), s.requireCSRF).Post("/servers/{serverID}/databases", s.createServerDatabase)
 			active.With(s.requireServerPermission("server.databases.manage"), s.requireCSRF).Delete("/servers/{serverID}/databases/{databaseID}", s.deleteServerDatabase)
@@ -136,6 +149,8 @@ func (s *Server) Handler() http.Handler {
 			active.With(s.requireServerPermission("server.webhooks.manage"), s.requireCSRF).Post("/servers/{serverID}/webhooks", s.createWebhook)
 			active.With(s.requireServerPermission("server.webhooks.manage"), s.requireCSRF).Patch("/servers/{serverID}/webhooks/{webhookID}", s.setWebhookEnabled)
 			active.With(s.requireServerPermission("server.webhooks.manage"), s.requireCSRF).Post("/servers/{serverID}/webhooks/{webhookID}/test", s.testWebhook)
+			active.With(s.requireServerPermission("server.webhooks.manage")).Get("/servers/{serverID}/webhooks/{webhookID}/deliveries/{deliveryID}", s.webhookDelivery)
+			active.With(s.requireServerPermission("server.webhooks.manage"), s.requireCSRF).Post("/servers/{serverID}/webhooks/{webhookID}/deliveries/{deliveryID}/retry", s.retryWebhookDelivery)
 			active.With(s.requireServerPermission("server.webhooks.manage"), s.requireCSRF).Delete("/servers/{serverID}/webhooks/{webhookID}", s.deleteWebhook)
 			active.With(s.requireCSRF).Post("/servers/{serverID}/power", s.serverPower)
 			active.With(s.requireServerPermission("server.delete"), s.requireCSRF).Delete("/servers/{serverID}", s.deleteServer)
@@ -154,6 +169,9 @@ func (s *Server) Handler() http.Handler {
 			owner.With(s.requireCSRF).Put("/users/{userID}/server-access", s.setUserServerAccess)
 			owner.Get("/installation/settings", s.installationSettings)
 			owner.With(s.requireCSRF).Put("/installation/settings", s.updateInstallationSettings)
+			owner.Get("/installation/update", s.panelUpdate)
+			owner.With(s.requireCSRF).Post("/installation/update/check", s.checkPanelUpdate)
+			owner.With(s.requireCSRF).Post("/installation/update/apply", s.applyPanelUpdate)
 			owner.With(s.requireCSRF).Post("/system/containers/worker/restart", s.restartSystemWorker)
 		})
 	})

@@ -9,4 +9,10 @@ web/dist
 coverage
 tmp
 .tools
+.cache
+artifacts
+test-results
+playwright-report
+template-repository-scaffold
+docs/images/readme
 *.log

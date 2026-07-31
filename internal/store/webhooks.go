@@ -9,22 +9,25 @@ import (
 	"time"
 
 	"github.com/dockside-gg/game-panel/internal/identity"
+	"github.com/dockside-gg/game-panel/internal/sanitize"
 	"github.com/dockside-gg/game-panel/internal/secure"
 	"github.com/jackc/pgx/v5"
 )
 
 type WebhookDestination struct {
-	ID           string    `json:"id"`
-	ServerID     string    `json:"server_id"`
-	Name         string    `json:"name"`
-	Kind         string    `json:"kind"`
-	URLPreview   string    `json:"url_preview"`
-	Enabled      bool      `json:"enabled"`
-	EventFilters []string  `json:"event_filters"`
-	HasSecret    bool      `json:"has_signing_secret"`
-	CreatedBy    *string   `json:"created_by"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	ServerID       string    `json:"server_id"`
+	Name           string    `json:"name"`
+	Kind           string    `json:"kind"`
+	URLPreview     string    `json:"url_preview"`
+	Enabled        bool      `json:"enabled"`
+	DeliverEvents  bool      `json:"deliver_events"`
+	DeliverBackups bool      `json:"deliver_backups"`
+	EventFilters   []string  `json:"event_filters"`
+	HasSecret      bool      `json:"has_signing_secret"`
+	CreatedBy      *string   `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type WebhookDeliveryJob struct {
@@ -44,10 +47,21 @@ type WebhookDeliveryJob struct {
 	CreatedAt              time.Time
 }
 
+type WebhookDelivery struct {
+	ID             string     `json:"id"`
+	DestinationID  string     `json:"destination_id"`
+	Status         string     `json:"status"`
+	Attempts       int        `json:"attempts"`
+	ResponseStatus *int       `json:"response_status,omitempty"`
+	LastError      *string    `json:"last_error,omitempty"`
+	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
+}
+
 func (s *Store) CreateWebhook(
 	ctx context.Context,
 	serverID, actorID, name, kind, rawURL, signingSecret string,
-	eventFilters []string,
 	box *secure.Box,
 ) (WebhookDestination, error) {
 	id, err := identity.NewUUID()
@@ -66,22 +80,20 @@ func (s *Store) CreateWebhook(
 		}
 		encryptedSecret = &value
 	}
-	filters, err := json.Marshal(eventFilters)
-	if err != nil {
-		return WebhookDestination{}, err
-	}
 	var item WebhookDestination
 	var filterDocument []byte
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO webhook_destinations(
 			id, server_id, name, kind, url_encrypted, signing_secret_encrypted,
-			enabled, event_filters, created_by
+			enabled, deliver_events, deliver_backups, event_filters, created_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
-		RETURNING id, server_id, name, kind, enabled, event_filters,
+		VALUES ($1, $2, $3, $4, $5, $6, true, false, false, '[]', $7)
+		RETURNING id, server_id, name, kind, enabled, deliver_events,
+		          deliver_backups, event_filters,
 		          signing_secret_encrypted IS NOT NULL, created_by, created_at, updated_at
-	`, id, serverID, name, kind, encryptedURL, encryptedSecret, string(filters), actorID).Scan(
+	`, id, serverID, name, kind, encryptedURL, encryptedSecret, actorID).Scan(
 		&item.ID, &item.ServerID, &item.Name, &item.Kind, &item.Enabled,
+		&item.DeliverEvents, &item.DeliverBackups,
 		&filterDocument, &item.HasSecret, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -96,7 +108,8 @@ func (s *Store) CreateWebhook(
 
 func (s *Store) ListWebhooks(ctx context.Context, serverID string, box *secure.Box) ([]WebhookDestination, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, server_id, name, kind, url_encrypted, enabled, event_filters,
+		SELECT id, server_id, name, kind, url_encrypted, enabled,
+		       deliver_events, deliver_backups, event_filters,
 		       signing_secret_encrypted IS NOT NULL, created_by, created_at, updated_at
 		FROM webhook_destinations
 		WHERE server_id = $1
@@ -113,7 +126,8 @@ func (s *Store) ListWebhooks(ctx context.Context, serverID string, box *secure.B
 		var filters []byte
 		if err := rows.Scan(
 			&item.ID, &item.ServerID, &item.Name, &item.Kind, &encryptedURL,
-			&item.Enabled, &filters, &item.HasSecret, &item.CreatedBy,
+			&item.Enabled, &item.DeliverEvents, &item.DeliverBackups,
+			&filters, &item.HasSecret, &item.CreatedBy,
 			&item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -131,11 +145,26 @@ func (s *Store) ListWebhooks(ctx context.Context, serverID string, box *secure.B
 	return result, rows.Err()
 }
 
-func (s *Store) SetWebhookEnabled(ctx context.Context, serverID, webhookID string, enabled bool) error {
+func (s *Store) UpdateWebhook(
+	ctx context.Context,
+	serverID, webhookID string,
+	enabled, deliverEvents, deliverBackups *bool,
+	eventFilters []string,
+) error {
+	filters, err := json.Marshal(eventFilters)
+	if err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE webhook_destinations SET enabled = $3, updated_at = now()
+		UPDATE webhook_destinations
+		SET enabled = COALESCE($3, enabled),
+		    deliver_events = COALESCE($4, deliver_events),
+		    deliver_backups = COALESCE($5, deliver_backups),
+		    event_filters = CASE WHEN $6 THEN $7::jsonb ELSE event_filters END,
+		    updated_at = now()
 		WHERE id = $1 AND server_id = $2
-	`, webhookID, serverID, enabled)
+	`, webhookID, serverID, enabled, deliverEvents, deliverBackups,
+		eventFilters != nil, string(filters))
 	if err != nil {
 		return err
 	}
@@ -158,18 +187,21 @@ func (s *Store) DeleteWebhook(ctx context.Context, serverID, webhookID string) e
 	return nil
 }
 
-func (s *Store) QueueWebhookTest(ctx context.Context, serverID, actorID, webhookID string) error {
+func (s *Store) QueueWebhookTest(
+	ctx context.Context,
+	serverID, actorID, webhookID string,
+) (WebhookDelivery, error) {
 	eventID, err := identity.NewUUID()
 	if err != nil {
-		return err
+		return WebhookDelivery{}, err
 	}
 	deliveryID, err := identity.NewUUID()
 	if err != nil {
-		return err
+		return WebhookDelivery{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return WebhookDelivery{}, err
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
@@ -178,16 +210,16 @@ func (s *Store) QueueWebhookTest(ctx context.Context, serverID, actorID, webhook
 			SELECT 1 FROM webhook_destinations WHERE id = $1 AND server_id = $2
 		)
 	`, webhookID, serverID).Scan(&exists); err != nil {
-		return err
+		return WebhookDelivery{}, err
 	}
 	if !exists {
-		return ErrNotFound
+		return WebhookDelivery{}, ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO activity_events(id, server_id, actor_user_id, event_type, summary, data)
 		VALUES ($1, $2, $3, 'webhook.test', 'Dockside webhook test', $4)
 	`, eventID, serverID, actorID, map[string]any{"destination_id": webhookID}); err != nil {
-		return err
+		return WebhookDelivery{}, err
 	}
 	// The activity trigger may not target this destination if its filters exclude tests.
 	if _, err := tx.Exec(ctx, `
@@ -198,9 +230,60 @@ func (s *Store) QueueWebhookTest(ctx context.Context, serverID, actorID, webhook
 			WHERE destination_id = $2 AND event_id = $3
 		)
 	`, deliveryID, webhookID, eventID); err != nil {
+		return WebhookDelivery{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WebhookDelivery{}, err
+	}
+	return s.WebhookDeliveryByID(ctx, serverID, webhookID, deliveryID)
+}
+
+func (s *Store) WebhookDeliveryByID(
+	ctx context.Context,
+	serverID, webhookID, deliveryID string,
+) (WebhookDelivery, error) {
+	var item WebhookDelivery
+	err := s.pool.QueryRow(ctx, `
+		SELECT delivery.id, delivery.destination_id, delivery.status,
+		       delivery.attempts, delivery.response_status, delivery.last_error,
+		       delivery.next_attempt_at, delivery.created_at, delivery.delivered_at
+		FROM webhook_deliveries AS delivery
+		JOIN webhook_destinations AS destination
+		  ON destination.id = delivery.destination_id
+		WHERE delivery.id = $1 AND destination.id = $2
+		  AND destination.server_id = $3
+	`, deliveryID, webhookID, serverID).Scan(
+		&item.ID, &item.DestinationID, &item.Status, &item.Attempts,
+		&item.ResponseStatus, &item.LastError, &item.NextAttemptAt,
+		&item.CreatedAt, &item.DeliveredAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return item, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) RetryWebhookDelivery(
+	ctx context.Context,
+	serverID, webhookID, deliveryID string,
+) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE webhook_deliveries AS delivery
+		SET status = 'queued', next_attempt_at = now(), last_error = NULL
+		FROM webhook_destinations AS destination
+		WHERE delivery.id = $1
+		  AND delivery.destination_id = $2
+		  AND destination.id = delivery.destination_id
+		  AND destination.server_id = $3
+		  AND delivery.status IN ('dead', 'retrying')
+	`, deliveryID, webhookID, serverID)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (s *Store) ClaimWebhookDelivery(ctx context.Context) (WebhookDeliveryJob, error) {
@@ -274,7 +357,7 @@ func (s *Store) FinishWebhookDelivery(
 	if retryAfter > time.Hour {
 		retryAfter = time.Hour
 	}
-	detail := deliveryErr.Error()
+	detail := sanitize.Text(deliveryErr.Error())
 	if len(detail) > 2000 {
 		detail = detail[:2000]
 	}

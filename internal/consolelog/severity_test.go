@@ -7,11 +7,10 @@ func TestClassifyDoesNotEquateStderrWithFailure(t *testing.T) {
 	tests := []struct {
 		stream, message, want string
 	}{
-		{"stderr", "steamclient.so: cannot open shared object file: No such file", "notice"},
-		{"stderr", "[S_API] SteamAPI_Init(): Loaded '/home/container/.steam/sdk64/steamclient.so' OK.", "info"},
-		{"stderr", "[S_API FAIL] Tried to access Steam interface before initialization", "warning"},
-		{"stdout", "FATAL: address already in use", "fatal"},
-		{"stdout", "Running dedicated server on :8211", "info"},
+		{"stderr", "routine application diagnostic", "notice"},
+		{"stderr", "the word error is game-owned text", "notice"},
+		{"stdout", "fatal-looking game-owned text", "info"},
+		{"system", "panel-generated lifecycle message", "info"},
 	}
 	for _, test := range tests {
 		if got := Classify(test.stream, test.message); got != test.want {

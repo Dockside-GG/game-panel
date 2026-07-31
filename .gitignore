@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+/.dockside-release
 *.local
 secrets/
 *.pem
@@ -9,6 +10,7 @@ secrets/
 *.p12
 *.pfx
 *.jks
+.cache/
 
 # Runtime state and user data
 data/
@@ -57,6 +59,7 @@ tmp/
 .fleet/
 .codex/
 .agents/
+/template-repository-scaffold/
 .DS_Store
 Thumbs.db
 Desktop.ini
@@ -65,8 +68,6 @@ Desktop.ini
 compose.override.yml
 docker-compose.override.yml
 
-# Generated embedded assets. Keep the placeholders/catalog required to build.
+# Generated embedded web assets.
 internal/webui/dist/*
 !internal/webui/dist/index.html
-templates/library/generated/*
-!templates/library/generated/catalog.json

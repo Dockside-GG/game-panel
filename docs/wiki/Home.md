@@ -8,6 +8,7 @@ Start here:
 - [Discord authentication and invitations](../DISCORD_AUTH.md)
 - [Reverse proxy and shared-host setup](../REVERSE_PROXY.md)
 - [Operations, upgrades, backup, and recovery](../OPERATIONS.md)
+- [Panel updates and recovery snapshots](../UPDATES.md)
 - [Architecture](../ARCHITECTURE.md)
 - [Security](../SECURITY.md)
 

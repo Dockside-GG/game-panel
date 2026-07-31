@@ -27,6 +27,8 @@ type TemplateSummary struct {
 	VariableCount        int             `json:"variable_count"`
 	Compatibility        json.RawMessage `json:"compatibility_report"`
 	DerivedFromVersionID *string         `json:"derived_from_version_id,omitempty"`
+	CatalogManaged       bool            `json:"catalog_managed"`
+	CatalogVersion       *string         `json:"catalog_version,omitempty"`
 }
 
 func (s *Store) ForkTemplate(
@@ -41,7 +43,7 @@ func (s *Store) ForkTemplate(
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE templates
 		SET derived_from_version_id = COALESCE(derived_from_version_id, $2)
-		WHERE id = $1 AND source_kind = 'custom'
+		WHERE id = $1 AND source_kind = 'dockside' AND NOT catalog_managed
 	`, item.ID, parentVersionID); err != nil {
 		return TemplateDetail{}, err
 	}
@@ -66,9 +68,11 @@ func (s *Store) ImportCustomTemplate(
 	defer tx.Rollback(ctx)
 	slug := entry.Slug
 	var templateID, existingKind string
+	var catalogManaged bool
 	err = tx.QueryRow(ctx, `
-		SELECT id, source_kind FROM templates WHERE slug = $1 FOR UPDATE
-	`, slug).Scan(&templateID, &existingKind)
+		SELECT id, source_kind, catalog_managed
+		FROM templates WHERE slug = $1 FOR UPDATE
+	`, slug).Scan(&templateID, &existingKind, &catalogManaged)
 	if errors.Is(err, pgx.ErrNoRows) {
 		templateID, err = identity.NewUUID()
 		if err != nil {
@@ -77,13 +81,13 @@ func (s *Store) ImportCustomTemplate(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO templates(
 				id, slug, name, category, source_kind, author, description, trust_state
-			) VALUES ($1, $2, $3, $4, 'custom', NULLIF($5, ''), $6, 'community')
+			) VALUES ($1, $2, $3, $4, 'dockside', NULLIF($5, ''), $6, 'community')
 		`, templateID, slug, entry.Name, entry.Category, entry.Author, entry.Description); err != nil {
 			return TemplateDetail{}, err
 		}
 	} else if err != nil {
 		return TemplateDetail{}, err
-	} else if existingKind != "custom" {
+	} else if existingKind != "dockside" || catalogManaged {
 		slug += "-" + entry.SourceDigest[:10]
 		templateID, err = identity.NewUUID()
 		if err != nil {
@@ -92,7 +96,7 @@ func (s *Store) ImportCustomTemplate(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO templates(
 				id, slug, name, category, source_kind, author, description, trust_state
-			) VALUES ($1, $2, $3, $4, 'custom', NULLIF($5, ''), $6, 'community')
+			) VALUES ($1, $2, $3, $4, 'dockside', NULLIF($5, ''), $6, 'community')
 		`, templateID, slug, entry.Name, entry.Category, entry.Author, entry.Description); err != nil {
 			return TemplateDetail{}, err
 		}
@@ -183,7 +187,13 @@ func (s *Store) ArchiveCustomTemplate(
 	} else if err != nil {
 		return err
 	}
-	if sourceKind != "custom" || confirmName != name {
+	var catalogManaged bool
+	if err := tx.QueryRow(ctx, `
+		SELECT catalog_managed FROM templates WHERE id = $1
+	`, templateID).Scan(&catalogManaged); err != nil {
+		return err
+	}
+	if sourceKind != "dockside" || catalogManaged || confirmName != name {
 		return ErrConflict
 	}
 	var inUse bool
@@ -229,7 +239,8 @@ func (s *Store) ListTemplates(ctx context.Context, search, category, source stri
 	rows, err := s.pool.Query(ctx, `
 		WITH latest AS (
 			SELECT DISTINCT ON (template_id)
-				id, template_id, version, canonical_document, compatibility_report
+				id, template_id, version, catalog_version, canonical_document,
+				compatibility_report
 			FROM template_versions
 			ORDER BY template_id, version DESC
 		)
@@ -239,6 +250,7 @@ func (s *Store) ListTemplates(ctx context.Context, search, category, source stri
 			COALESCE(latest.canonical_document->>'default_image', ''),
 			COALESCE(jsonb_array_length(latest.canonical_document->'variables'), 0),
 			latest.compatibility_report, t.derived_from_version_id,
+			t.catalog_managed, latest.catalog_version,
 			count(*) OVER()
 		FROM templates t
 		JOIN latest ON latest.template_id = t.id
@@ -261,7 +273,8 @@ func (s *Store) ListTemplates(ctx context.Context, search, category, source stri
 			&item.ID, &item.VersionID, &item.Slug, &item.Name, &item.Category,
 			&item.SourceKind, &item.Author, &item.Description, &item.TrustState,
 			&item.Version, &item.DefaultImage, &item.VariableCount,
-			&item.Compatibility, &item.DerivedFromVersionID, &total,
+			&item.Compatibility, &item.DerivedFromVersionID,
+			&item.CatalogManaged, &item.CatalogVersion, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan template: %w", err)
 		}
@@ -282,6 +295,7 @@ func (s *Store) TemplateByVersion(ctx context.Context, versionID string) (Templa
 			COALESCE(v.canonical_document->>'default_image', ''),
 			COALESCE(jsonb_array_length(v.canonical_document->'variables'), 0),
 			v.compatibility_report, t.derived_from_version_id,
+			t.catalog_managed, v.catalog_version,
 			v.canonical_document, v.source_document
 		FROM template_versions v
 		JOIN templates t ON t.id = v.template_id
@@ -291,6 +305,7 @@ func (s *Store) TemplateByVersion(ctx context.Context, versionID string) (Templa
 		&item.SourceKind, &item.Author, &item.Description, &item.TrustState,
 		&item.Version, &item.DefaultImage, &item.VariableCount,
 		&item.Compatibility, &item.DerivedFromVersionID,
+		&item.CatalogManaged, &item.CatalogVersion,
 		&item.CanonicalDocument, &item.SourceDocument,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

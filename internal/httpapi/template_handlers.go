@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,6 +30,11 @@ type serverTemplateRequest struct {
 	Name        string `json:"name"`
 	Category    string `json:"category"`
 	Description string `json:"description"`
+}
+
+type updateServerTemplateRequest struct {
+	TargetVersionID string `json:"target_version_id"`
+	Mode            string `json:"mode"`
 }
 
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +81,24 @@ func (s *Server) templateFacets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) templateCatalogStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.catalog.Status(r.Context())
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) syncTemplateCatalog(w http.ResponseWriter, r *http.Request) {
+	status, err := s.catalog.Sync(r.Context())
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
 func (s *Server) importTemplate(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	if !canAdminister(session.User.PanelRole) {
@@ -92,7 +116,7 @@ func (s *Server) importTemplate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid template document or category")))
 		return
 	}
-	entry, err := templates.Normalize("custom", input.Category, "", input.Document)
+	entry, err := templates.Normalize("dockside", input.Category, "", input.Document)
 	if err != nil {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
@@ -133,15 +157,15 @@ func (s *Server) forkTemplate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid template document or category")))
 		return
 	}
-	entry, err := templates.Normalize("custom", input.Category, "", input.Document)
+	entry, err := templates.Normalize("dockside", input.Category, "", input.Document)
 	if err != nil {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
 	}
-	if parent.SourceKind == "custom" {
+	if parent.SourceKind == "dockside" && !parent.CatalogManaged {
 		entry.Slug = parent.Slug
 	} else {
-		entry.Slug = "custom-" + parent.Slug
+		entry.Slug = "dockside-" + parent.Slug
 	}
 	item, err := s.store.ForkTemplate(
 		r.Context(), session.User.ID, parent.VersionID, entry,
@@ -151,6 +175,41 @@ func (s *Server) forkTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) exportTemplate(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.TemplateByVersion(r.Context(), chi.URLParam(r, "versionID"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	var document json.RawMessage
+	switch format {
+	case "", "dockside":
+		document, err = templates.ExportDockside(item.CanonicalDocument)
+	case "source":
+		document = item.SourceDocument
+	default:
+		writeProblem(w, r, errors.Join(errBadRequest, errors.New("export format must be dockside or source")))
+		return
+	}
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	filename := item.Slug
+	if format == "" || format == "dockside" {
+		filename += ".dockside"
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(
+		"Content-Disposition",
+		fmt.Sprintf(`attachment; filename="%s.json"`, strings.ReplaceAll(filename, `"`, "")),
+	)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(document, '\n'))
 }
 
 func (s *Server) archiveTemplate(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +287,12 @@ func (s *Server) createTemplateFromServer(w http.ResponseWriter, r *http.Request
 			"rules":         variable.Rules, "field_type": variable.FieldType,
 		})
 	}
-	networkPorts := make([]templates.NetworkPort, 0, len(configuration.Ports))
+	networkPorts := make([]templates.NetworkPort, 0, len(configuration.Ports)+len(canonical.NetworkPorts))
+	for _, port := range canonical.NetworkPorts {
+		if port.InternalOnly {
+			networkPorts = append(networkPorts, port)
+		}
+	}
 	for _, port := range configuration.Ports {
 		name := strings.TrimSpace(port.Purpose)
 		if name == "" {
@@ -277,7 +341,7 @@ func (s *Server) createTemplateFromServer(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, err)
 		return
 	}
-	entry, err := templates.Normalize("custom", input.Category, "", encoded)
+	entry, err := templates.Normalize("dockside", input.Category, "", encoded)
 	if err != nil {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
@@ -290,4 +354,41 @@ func (s *Server) createTemplateFromServer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) serverTemplateUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.store.ServerTemplateUpdateStatus(
+		r.Context(), chi.URLParam(r, "serverID"),
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) updateServerTemplate(w http.ResponseWriter, r *http.Request) {
+	session, _ := sessionFromContext(r.Context())
+	var input updateServerTemplateRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.TargetVersionID = strings.TrimSpace(input.TargetVersionID)
+	input.Mode = strings.ToLower(strings.TrimSpace(input.Mode))
+	if input.TargetVersionID == "" || (input.Mode != "rebase" && input.Mode != "reinstall") {
+		writeProblem(w, r, errors.Join(errBadRequest, errors.New("target_version_id and update mode are required")))
+		return
+	}
+	job, err := s.store.QueueTemplateUpdate(
+		r.Context(), chi.URLParam(r, "serverID"), session.User.ID,
+		input.TargetVersionID, input.Mode,
+	)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"operation_id": job.OperationID,
+		"backup_id":    job.BackupID,
+	})
 }

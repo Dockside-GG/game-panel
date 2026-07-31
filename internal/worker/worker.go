@@ -1,10 +1,7 @@
 package worker
 
 import (
-	"archive/tar"
-	"archive/zip"
 	"bufio"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,10 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dockside-gg/game-panel/internal/archiveutil"
 	"github.com/dockside-gg/game-panel/internal/config"
-	"github.com/dockside-gg/game-panel/internal/consolelog"
 	"github.com/dockside-gg/game-panel/internal/engineclient"
 	"github.com/dockside-gg/game-panel/internal/identity"
+	"github.com/dockside-gg/game-panel/internal/sanitize"
 	"github.com/dockside-gg/game-panel/internal/secure"
 	"github.com/dockside-gg/game-panel/internal/store"
 	"github.com/dockside-gg/game-panel/internal/webhooks"
@@ -90,9 +88,6 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err := w.store.SyncRuntimeStats(ctx, snapshots); err != nil {
 				w.logger.Error("runtime telemetry synchronization failed", "error", err)
 			}
-			if err := w.pollConsoleLogs(ctx); err != nil {
-				w.logger.Warn("console warning/error polling failed", "error", err)
-			}
 		case <-cleanupTicker.C:
 			if err := w.cleanup(ctx); err != nil {
 				w.logger.Error("cleanup failed", "error", err)
@@ -132,7 +127,7 @@ func (w *Worker) processOneWebhook(ctx context.Context) error {
 			"delivery_id", job.DeliveryID,
 			"destination_id", job.DestinationID,
 			"attempt", job.Attempts,
-			"error", deliveryErr,
+			"error", sanitize.Text(deliveryErr.Error()),
 		)
 	}
 	return w.store.FinishWebhookDelivery(
@@ -293,25 +288,162 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 			return nil
 		}
 		recoveryErr := w.engine.Power(ctx, payload.ServerID, "start")
+		stillDesired, err := w.store.RecoveryStillDesired(ctx, payload.ServerID)
+		if err != nil {
+			return fmt.Errorf("verify server recovery intent: %w", err)
+		}
+		if !stillDesired {
+			if recoveryErr == nil {
+				if stopErr := w.engine.Power(ctx, payload.ServerID, "stop"); stopErr != nil {
+					return fmt.Errorf("stop cancelled server recovery: %w", stopErr)
+				}
+			}
+			return nil
+		}
 		if err := w.store.FinishRecovery(
 			ctx, payload.ServerID, payload.Attempt, recoveryErr,
 		); err != nil {
 			return fmt.Errorf("finish server recovery: %w", err)
 		}
 		return nil
-	case "server.enforce_stop":
-		var payload struct {
-			ServerID string `json:"server_id"`
+	case "server.template_update":
+		var job store.TemplateUpdateJob
+		if err := json.Unmarshal(event.Payload, &job); err != nil {
+			return fmt.Errorf("decode template update event: %w", err)
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return fmt.Errorf("decode enforced stop event: %w", err)
-		}
-		pending, err := w.store.IntentionalStopPending(ctx, payload.ServerID)
-		if err != nil || !pending {
+		if err := w.store.MarkTemplateUpdateRunning(
+			ctx, job, 5, "Creating mandatory full backup",
+		); err != nil {
 			return err
 		}
-		stopErr := w.engine.Power(ctx, payload.ServerID, "stop")
-		return w.store.FinishIntentionalStop(ctx, payload.ServerID, stopErr)
+		backupJob := store.BackupJob{
+			BackupID: job.BackupID, ServerID: job.ServerID,
+			IncludePath: []string{}, ExcludeGlob: []string{},
+		}
+		if err := w.store.MarkBackupRunning(ctx, job.BackupID); err != nil {
+			return err
+		}
+		backupResult, err := w.engine.CreateBackup(
+			ctx, job.ServerID, job.BackupID, nil, nil,
+		)
+		if err != nil {
+			if event.Attempts < 3 {
+				return err
+			}
+			_ = w.store.MarkBackupFailed(ctx, backupJob, err)
+			return w.store.FinishTemplateUpdate(ctx, job, "", fmt.Errorf("mandatory pre-update backup failed: %w", err))
+		}
+		if err := w.store.MarkBackupSucceeded(ctx, backupJob, backupResult); err != nil {
+			return err
+		}
+		previousConfiguration, err := w.store.ServerConfiguration(
+			ctx, job.ServerID, w.box,
+		)
+		if err != nil {
+			return w.store.FinishTemplateUpdate(ctx, job, "", err)
+		}
+		if err := w.store.MarkTemplateUpdateRunning(
+			ctx, job, 25, "Stopping game server",
+		); err != nil {
+			return err
+		}
+		if job.WasRunning {
+			if err := w.engine.Power(ctx, job.ServerID, "stop"); err != nil {
+				return w.store.FinishTemplateUpdate(ctx, job, "", fmt.Errorf("stop server for template update: %w", err))
+			}
+		}
+		failBeforeRuntimeChange := func(updateErr error) error {
+			if job.WasRunning {
+				if startErr := w.engine.Power(
+					context.WithoutCancel(ctx), job.ServerID, "start",
+				); startErr != nil {
+					updateErr = fmt.Errorf(
+						"%v; returning server to its prior running state failed: %w",
+						updateErr, startErr,
+					)
+				}
+			}
+			return w.store.FinishTemplateUpdate(ctx, job, "", updateErr)
+		}
+		if err := w.store.MarkTemplateUpdateRunning(
+			ctx, job, 40, "Applying new template version",
+		); err != nil {
+			return failBeforeRuntimeChange(err)
+		}
+		canonical, err := w.store.SetServerTemplateVersion(
+			ctx, job.ServerID, job.TargetVersion,
+		)
+		if err != nil {
+			return failBeforeRuntimeChange(err)
+		}
+		newConfiguration, err := w.store.ServerConfiguration(
+			ctx, job.ServerID, w.box,
+		)
+		if err == nil && job.Mode == "reinstall" {
+			if install := newConfiguration.InstallSpec(canonical); install != nil {
+				if markErr := w.store.MarkTemplateUpdateRunning(
+					ctx, job, 55, "Running updated template installer",
+				); markErr != nil {
+					err = markErr
+				} else {
+					err = w.engine.InstallExisting(ctx, job.ServerID, *install)
+				}
+			}
+		}
+		var result engineclient.ProvisionResult
+		if err == nil {
+			if markErr := w.store.MarkTemplateUpdateRunning(
+				ctx, job, 75, "Replacing runtime container configuration",
+			); markErr != nil {
+				err = markErr
+			} else {
+				result, err = w.engine.Reconfigure(
+					ctx, job.ServerID, newConfiguration.RuntimeRequest(),
+				)
+			}
+		}
+		if err != nil {
+			updateErr := err
+			_, _ = w.store.SetServerTemplateVersion(
+				context.WithoutCancel(ctx), job.ServerID, job.PreviousVersion,
+			)
+			if job.Mode == "reinstall" {
+				if restoreErr := w.engine.RestoreBackup(
+					context.WithoutCancel(ctx), job.ServerID, job.BackupID, backupResult.SHA256,
+				); restoreErr != nil {
+					updateErr = fmt.Errorf("%v; file rollback failed: %w", updateErr, restoreErr)
+				}
+			}
+			if rollback, rollbackErr := w.engine.Reconfigure(
+				context.WithoutCancel(ctx), job.ServerID, previousConfiguration.RuntimeRequest(),
+			); rollbackErr != nil {
+				updateErr = fmt.Errorf("%v; runtime rollback failed: %w", updateErr, rollbackErr)
+			} else {
+				result = rollback
+			}
+			if job.WasRunning {
+				if startErr := w.engine.Power(context.WithoutCancel(ctx), job.ServerID, "start"); startErr != nil {
+					updateErr = fmt.Errorf("%v; server restart failed: %w", updateErr, startErr)
+				}
+			}
+			return w.store.FinishTemplateUpdate(ctx, job, result.ContainerID, updateErr)
+		}
+		if job.WasRunning {
+			if err := w.store.MarkTemplateUpdateRunning(
+				ctx, job, 90, "Starting updated game server",
+			); err != nil {
+				w.logger.Warn(
+					"record template update start progress failed",
+					"server_id", job.ServerID,
+					"operation_id", job.OperationID,
+					"error", err,
+				)
+			}
+			if err := w.engine.Power(ctx, job.ServerID, "start"); err != nil {
+				return w.store.FinishTemplateUpdate(ctx, job, result.ContainerID, err)
+			}
+		}
+		return w.store.FinishTemplateUpdate(ctx, job, result.ContainerID, nil)
 	case "backup.create":
 		var payload struct {
 			BackupID string `json:"backup_id"`
@@ -342,6 +474,56 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 			return fmt.Errorf("record backup success: %w", err)
 		}
 		return nil
+	case "backup.restore":
+		var job store.BackupRestoreJob
+		if err := json.Unmarshal(event.Payload, &job); err != nil {
+			return fmt.Errorf("decode backup restore event: %w", err)
+		}
+		if err := w.store.MarkBackupRestoreRunning(
+			ctx, job, 10, "Preparing server for restore",
+		); err != nil {
+			return err
+		}
+		var restoreErr error
+		if job.WasRunning {
+			if err := w.store.MarkBackupRestoreRunning(
+				ctx, job, 20, "Stopping game server",
+			); err != nil {
+				return err
+			}
+			restoreErr = w.engine.Power(ctx, job.ServerID, "stop")
+		}
+		if restoreErr == nil {
+			if err := w.store.MarkBackupRestoreRunning(
+				ctx, job, 45, "Verifying archive and restoring files",
+			); err != nil {
+				restoreErr = err
+			} else {
+				restoreErr = w.engine.RestoreBackup(
+					ctx, job.ServerID, job.BackupID, job.SHA256,
+				)
+			}
+		}
+		if job.WasRunning {
+			if err := w.store.MarkBackupRestoreRunning(
+				ctx, job, 85, "Starting game server",
+			); err != nil {
+				w.logger.Warn(
+					"record backup restore start progress failed",
+					"server_id", job.ServerID,
+					"operation_id", job.OperationID,
+					"error", err,
+				)
+			}
+			if startErr := w.engine.Power(ctx, job.ServerID, "start"); startErr != nil {
+				if restoreErr == nil {
+					restoreErr = fmt.Errorf("files restored but server restart failed: %w", startErr)
+				} else {
+					restoreErr = fmt.Errorf("%v; returning server to running state failed: %w", restoreErr, startErr)
+				}
+			}
+		}
+		return w.store.FinishBackupRestore(ctx, job, restoreErr)
 	case "backup.discord_delivery":
 		var payload struct {
 			DeliveryID string `json:"delivery_id"`
@@ -352,14 +534,6 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 		job, err := w.store.BeginBackupDelivery(ctx, payload.DeliveryID)
 		if err != nil {
 			return err
-		}
-		const discordDefaultAttachmentLimit = int64(10 << 20)
-		if job.SizeBytes > discordDefaultAttachmentLimit {
-			err := fmt.Errorf(
-				"backup is %d bytes; Discord's default webhook attachment limit is %d bytes",
-				job.SizeBytes, discordDefaultAttachmentLimit,
-			)
-			return w.store.FinishBackupDelivery(ctx, job.DeliveryID, "too_large", 0, err)
 		}
 		rawURL, err := w.box.Open(
 			job.URLEncrypted, []byte("webhook:"+job.DestinationID+":url"),
@@ -377,12 +551,12 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 		}
 		defer download.Body.Close()
 		var content io.Reader = download.Body
-		filename := safeBackupFilename(job.BackupName) + ".tar.gz"
+		filename := archiveutil.SafeFilename(job.BackupName) + ".tar.gz"
 		if job.Format == "zip" {
-			zipped := zipArchive(download.Body)
+			zipped := archiveutil.ZipTarGzip(download.Body)
 			defer zipped.Close()
 			content = zipped
-			filename = safeBackupFilename(job.BackupName) + ".zip"
+			filename = archiveutil.SafeFilename(job.BackupName) + ".zip"
 		}
 		status, retryAfter, permanent, deliveryErr := w.webhooks.SendBackup(
 			ctx, job, rawURL, filename, content,
@@ -424,67 +598,6 @@ func (w *Worker) handle(ctx context.Context, event event) error {
 	default:
 		return fmt.Errorf("no handler registered for topic %q", event.Topic)
 	}
-}
-
-func zipArchive(source io.Reader) io.ReadCloser {
-	reader, writer := io.Pipe()
-	go func() {
-		var resultErr error
-		compressed, err := gzip.NewReader(source)
-		if err != nil {
-			_ = writer.CloseWithError(err)
-			return
-		}
-		archive := tar.NewReader(compressed)
-		zipped := zip.NewWriter(writer)
-		for {
-			header, nextErr := archive.Next()
-			if errors.Is(nextErr, io.EOF) {
-				break
-			}
-			if nextErr != nil {
-				resultErr = nextErr
-				break
-			}
-			if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
-				continue
-			}
-			zipHeader := &zip.FileHeader{
-				Name: header.Name, Method: zip.Deflate,
-				Modified: header.ModTime,
-			}
-			target, createErr := zipped.CreateHeader(zipHeader)
-			if createErr != nil {
-				resultErr = createErr
-				break
-			}
-			if _, copyErr := io.CopyN(target, archive, header.Size); copyErr != nil {
-				resultErr = copyErr
-				break
-			}
-		}
-		if closeErr := compressed.Close(); resultErr == nil {
-			resultErr = closeErr
-		}
-		if closeErr := zipped.Close(); resultErr == nil {
-			resultErr = closeErr
-		}
-		_ = writer.CloseWithError(resultErr)
-	}()
-	return reader
-}
-
-func safeBackupFilename(value string) string {
-	value = strings.TrimSpace(value)
-	value = regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(value, "-")
-	value = strings.Trim(value, ".-_")
-	if value == "" {
-		return "dockside-backup"
-	}
-	if len(value) > 100 {
-		value = value[:100]
-	}
-	return value
 }
 
 func (w *Worker) persistProvisionLogs(
@@ -559,12 +672,10 @@ func (w *Worker) executeScheduleTask(
 	switch task.TaskType {
 	case "backup":
 		var config struct {
-			Name             string   `json:"name"`
-			IncludePaths     []string `json:"include_paths"`
-			ExcludeGlobs     []string `json:"exclude_globs"`
-			RetentionDays    *int     `json:"retention_days"`
-			DiscordWebhookID *string  `json:"discord_webhook_id"`
-			DiscordFormat    string   `json:"discord_format"`
+			Name          string   `json:"name"`
+			IncludePaths  []string `json:"include_paths"`
+			ExcludeGlobs  []string `json:"exclude_globs"`
+			RetentionDays *int     `json:"retention_days"`
 		}
 		if err := json.Unmarshal(task.Config, &config); err != nil {
 			return err
@@ -572,7 +683,6 @@ func (w *Worker) executeScheduleTask(
 		_, err := w.store.CreateBackup(
 			ctx, job.ServerID, job.ActorID, config.Name, config.IncludePaths,
 			config.ExcludeGlobs, config.RetentionDays,
-			config.DiscordWebhookID, config.DiscordFormat,
 		)
 		return err
 	case "power":
@@ -630,8 +740,6 @@ func (w *Worker) cleanup(ctx context.Context) error {
 		DELETE FROM oauth_states WHERE expires_at < now() - interval '1 day';
 		DELETE FROM sessions
 		WHERE COALESCE(revoked_at, absolute_expires_at) < now() - interval '30 days';
-		DELETE FROM server_log_events_seen
-		WHERE created_at < now() - interval '1 day';
 		DELETE FROM operation_log_entries
 		WHERE observed_at < now() - interval '30 days';
 	`)
@@ -660,38 +768,6 @@ func (w *Worker) expireBackups(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (w *Worker) pollConsoleLogs(ctx context.Context) error {
-	events, err := w.engine.LogEvents(ctx, time.Now().UTC().Add(-12*time.Second))
-	if err != nil {
-		return err
-	}
-	for _, event := range events {
-		severity := classifyConsoleLog(event.Stream, event.Message)
-		if severity == "" {
-			continue
-		}
-		message := sanitizeConsoleLog(event.Message)
-		if message == "" {
-			continue
-		}
-		if err := w.store.RecordConsoleLogEvent(ctx, event, severity, message); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func classifyConsoleLog(stream, message string) string {
-	severity := consolelog.Classify(stream, message)
-	if severity == "fatal" {
-		return "error"
-	}
-	if severity == "error" || severity == "warning" {
-		return severity
-	}
-	return ""
 }
 
 func sanitizeConsoleLog(message string) string {

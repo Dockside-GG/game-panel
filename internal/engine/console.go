@@ -327,6 +327,21 @@ length="$(printf '%s' "$BODY" | wc -c | tr -d ' ')"
 
 var environmentReference = regexp.MustCompile(`\{\{ENV:([A-Z_][A-Z0-9_]*)\}\}`)
 
+type restCommandValues struct {
+	command   string
+	verb      string
+	args      string
+	arguments []string
+}
+
+type resolvedRESTRequest struct {
+	method         string
+	path           string
+	body           string
+	headers        map[string]string
+	acceptedStatus []int
+}
+
 func (s *Server) executeRESTCommand(
 	ctx context.Context,
 	serverID, gameContainerID, command string,
@@ -337,6 +352,10 @@ func (s *Server) executeRESTCommand(
 		return "", errors.New("REST command transport is not configured")
 	}
 	spec := transport.REST
+	request, err := resolveRESTRequest(spec, command, environment)
+	if err != nil {
+		return "", err
+	}
 	port := spec.Port
 	if spec.PortEnvironment != "" {
 		value, err := strconv.Atoi(strings.TrimSpace(environment[spec.PortEnvironment]))
@@ -348,24 +367,9 @@ func (s *Server) executeRESTCommand(
 	if port < 1 || port > 65535 {
 		return "", errors.New("REST command port is unavailable")
 	}
-	pathValue, err := renderRESTValue(spec.Path, command, environment, true)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(pathValue, "/") || strings.ContainsAny(pathValue, "\r\n ") {
-		return "", errors.New("REST command path rendered to an unsafe value")
-	}
-	body, err := renderRESTValue(spec.BodyTemplate, command, environment, false)
-	if err != nil {
-		return "", err
-	}
-	headers := make([]string, 0, len(spec.Headers)+1)
-	for name, value := range spec.Headers {
-		rendered, err := renderRESTValue(value, command, environment, false)
-		if err != nil || strings.ContainsAny(rendered, "\r\n") {
-			return "", errors.New("REST command header could not be rendered safely")
-		}
-		headers = append(headers, name+": "+rendered)
+	headers := make([]string, 0, len(request.headers)+1)
+	for name, value := range request.headers {
+		headers = append(headers, name+": "+value)
 	}
 	sort.Strings(headers)
 	timeout := spec.TimeoutSeconds
@@ -389,11 +393,11 @@ func (s *Server) executeRESTCommand(
 			Entrypoint: []string{"sh", "-c"},
 			Cmd:        []string{restCommandScript},
 			Env: environmentList(map[string]string{
-				"METHOD":       strings.ToUpper(spec.Method),
-				"REQUEST_PATH": pathValue,
+				"METHOD":       request.method,
+				"REQUEST_PATH": request.path,
 				"PORT":         strconv.Itoa(port),
 				"TIMEOUT":      strconv.Itoa(timeout),
-				"BODY":         body,
+				"BODY":         request.body,
 				"HEADERS_B64":  base64.StdEncoding.EncodeToString([]byte(strings.Join(headers, "\r\n"))),
 			}),
 			Labels: labels,
@@ -446,9 +450,9 @@ func (s *Server) executeRESTCommand(
 		return "", err
 	}
 	accepted := statusCode >= 200 && statusCode <= 299
-	if len(spec.AcceptedStatus) > 0 {
+	if len(request.acceptedStatus) > 0 {
 		accepted = false
-		for _, candidate := range spec.AcceptedStatus {
+		for _, candidate := range request.acceptedStatus {
 			accepted = accepted || candidate == statusCode
 		}
 	}
@@ -458,18 +462,170 @@ func (s *Server) executeRESTCommand(
 	return truncateText(payload, 4096), nil
 }
 
+func resolveRESTRequest(
+	spec *templates.RESTCommandTransport,
+	command string,
+	environment map[string]string,
+) (resolvedRESTRequest, error) {
+	values := parseRESTCommandValues(command)
+	method := spec.Method
+	path := spec.Path
+	bodyTemplate := spec.BodyTemplate
+	headers := make(map[string]string, len(spec.Headers)+4)
+	for name, value := range spec.Headers {
+		headers[name] = value
+	}
+	acceptedStatus := spec.AcceptedStatus
+	if len(spec.Routes) > 0 {
+		var selected *templates.RESTCommandRoute
+		for index := range spec.Routes {
+			route := &spec.Routes[index]
+			if route.Command == values.verb || stringInSlice(values.verb, route.Aliases) {
+				selected = route
+				break
+			}
+		}
+		if selected == nil {
+			commands := make([]string, 0, len(spec.Routes))
+			for _, route := range spec.Routes {
+				if route.Usage != "" {
+					commands = append(commands, route.Usage)
+				} else {
+					commands = append(commands, route.Command)
+				}
+			}
+			sort.Strings(commands)
+			return resolvedRESTRequest{}, fmt.Errorf(
+				"unknown REST command %q; available commands: %s",
+				values.verb, strings.Join(commands, ", "),
+			)
+		}
+		if len(values.arguments) < selected.MinArgs {
+			usage := selected.Usage
+			if usage == "" {
+				usage = selected.Command
+			}
+			return resolvedRESTRequest{}, fmt.Errorf("usage: %s", usage)
+		}
+		method = selected.Method
+		path = selected.Path
+		bodyTemplate = selected.BodyTemplate
+		for name, value := range selected.Headers {
+			headers[name] = value
+		}
+		if len(selected.AcceptedStatus) > 0 {
+			acceptedStatus = selected.AcceptedStatus
+		}
+	}
+	pathValue, err := renderRESTValue(path, values, environment, true)
+	if err != nil {
+		return resolvedRESTRequest{}, err
+	}
+	if !strings.HasPrefix(pathValue, "/") || strings.ContainsAny(pathValue, "\r\n ") {
+		return resolvedRESTRequest{}, errors.New("REST command path rendered to an unsafe value")
+	}
+	body, err := renderRESTValue(bodyTemplate, values, environment, false)
+	if err != nil {
+		return resolvedRESTRequest{}, err
+	}
+	renderedHeaders := make(map[string]string, len(headers)+1)
+	for name, value := range headers {
+		rendered, err := renderRESTValue(value, values, environment, false)
+		if err != nil || strings.ContainsAny(rendered, "\r\n") {
+			return resolvedRESTRequest{}, errors.New("REST command header could not be rendered safely")
+		}
+		renderedHeaders[name] = rendered
+	}
+	if spec.BasicAuth != nil {
+		password, ok := environment[spec.BasicAuth.PasswordEnvironment]
+		if !ok || password == "" {
+			return resolvedRESTRequest{}, fmt.Errorf(
+				"REST command requires environment variable %s",
+				spec.BasicAuth.PasswordEnvironment,
+			)
+		}
+		credentials := spec.BasicAuth.Username + ":" + password
+		renderedHeaders["Authorization"] = "Basic " +
+			base64.StdEncoding.EncodeToString([]byte(credentials))
+	}
+	return resolvedRESTRequest{
+		method:         strings.ToUpper(method),
+		path:           pathValue,
+		body:           body,
+		headers:        renderedHeaders,
+		acceptedStatus: acceptedStatus,
+	}, nil
+}
+
+func parseRESTCommandValues(command string) restCommandValues {
+	command = strings.TrimSpace(command)
+	fields := strings.Fields(command)
+	verb := ""
+	args := ""
+	if len(fields) > 0 {
+		verb = fields[0]
+		args = strings.TrimSpace(command[len(verb):])
+	}
+	return restCommandValues{
+		command:   command,
+		verb:      strings.ToLower(strings.TrimSpace(verb)),
+		args:      args,
+		arguments: strings.Fields(args),
+	}
+}
+
 func renderRESTValue(
-	value, command string,
+	value string,
+	values restCommandValues,
 	environment map[string]string,
 	escapeCommand bool,
 ) (string, error) {
-	commandValue := command
+	commandValue := values.command
+	argsValue := values.args
 	if escapeCommand {
-		commandValue = url.QueryEscape(command)
+		commandValue = url.QueryEscape(commandValue)
+		argsValue = url.QueryEscape(argsValue)
 	}
 	value = strings.ReplaceAll(value, "{{COMMAND}}", commandValue)
-	jsonCommand, _ := json.Marshal(command)
+	jsonCommand, _ := json.Marshal(values.command)
 	value = strings.ReplaceAll(value, "{{COMMAND_JSON}}", string(jsonCommand))
+	value = strings.ReplaceAll(value, "{{ARGS}}", argsValue)
+	jsonArgs, _ := json.Marshal(values.args)
+	value = strings.ReplaceAll(value, "{{ARGS_JSON}}", string(jsonArgs))
+	for index := 1; index <= 32; index++ {
+		argument := ""
+		after := ""
+		if index <= len(values.arguments) {
+			argument = values.arguments[index-1]
+		}
+		if index < len(values.arguments) {
+			after = strings.Join(values.arguments[index:], " ")
+		}
+		renderedArgument := argument
+		renderedAfter := after
+		if escapeCommand {
+			renderedArgument = url.QueryEscape(argument)
+			renderedAfter = url.QueryEscape(after)
+		}
+		value = strings.ReplaceAll(value, fmt.Sprintf("{{ARG%d}}", index), renderedArgument)
+		jsonArgument, _ := json.Marshal(argument)
+		value = strings.ReplaceAll(value, fmt.Sprintf("{{ARG%d_JSON}}", index), string(jsonArgument))
+		integerMarker := fmt.Sprintf("{{ARG%d_INT}}", index)
+		if strings.Contains(value, integerMarker) {
+			integer, err := strconv.Atoi(argument)
+			if err != nil {
+				return "", fmt.Errorf("REST command argument %d must be an integer", index)
+			}
+			value = strings.ReplaceAll(value, integerMarker, strconv.Itoa(integer))
+		}
+		value = strings.ReplaceAll(
+			value, fmt.Sprintf("{{ARGS_AFTER_%d}}", index), renderedAfter,
+		)
+		jsonAfter, _ := json.Marshal(after)
+		value = strings.ReplaceAll(
+			value, fmt.Sprintf("{{ARGS_AFTER_%d_JSON}}", index), string(jsonAfter),
+		)
+	}
 	var missing string
 	value = environmentReference.ReplaceAllStringFunc(value, func(marker string) string {
 		match := environmentReference.FindStringSubmatch(marker)
@@ -484,6 +640,15 @@ func renderRESTValue(
 		return "", fmt.Errorf("REST command requires environment variable %s", missing)
 	}
 	return value, nil
+}
+
+func stringInSlice(value string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func parseRESTResponse(response string) (int, string, error) {
@@ -579,7 +744,6 @@ type lineFrameWriter struct {
 	mu      sync.Mutex
 	timer   *time.Timer
 	pending []byte
-	logical []string
 }
 
 func (w *lineFrameWriter) Write(value []byte) (int, error) {
@@ -599,7 +763,12 @@ func (w *lineFrameWriter) Write(value []byte) (int, error) {
 			}
 		}
 	}
-	w.scheduleFlush()
+	if len(w.pending) > 0 {
+		w.scheduleFlush()
+	} else if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
 	return len(value), nil
 }
 
@@ -610,43 +779,20 @@ func (w *lineFrameWriter) flush() {
 		w.timer.Stop()
 		w.timer = nil
 	}
-	line := strings.TrimSpace(string(w.pending))
-	if line != "" {
+	line := string(w.pending)
+	if strings.TrimSpace(line) != "" {
 		_ = w.acceptLine(line)
 	}
 	w.pending = nil
-	_ = w.emitLogical()
 }
 
 func (w *lineFrameWriter) acceptLine(line string) error {
-	line = strings.TrimSpace(stripANSI(line))
-	if line == "" {
+	line = stripANSI(line)
+	if strings.TrimSpace(line) == "" {
 		return nil
 	}
-	if len(w.logical) == 0 {
-		w.logical = append(w.logical, line)
-		return nil
-	}
-	previous := w.logical[len(w.logical)-1]
-	if consoleLineContinues(previous, line) {
-		w.logical = append(w.logical, line)
-		return nil
-	}
-	if err := w.emitLogical(); err != nil {
-		return err
-	}
-	w.logical = append(w.logical, line)
-	return nil
-}
-
-func (w *lineFrameWriter) emitLogical() error {
-	if len(w.logical) == 0 {
-		return nil
-	}
-	message := strings.Join(w.logical, "\n")
-	w.logical = nil
 	return w.encoder.emit(consoleFrame{
-		Stream: w.stream, Phase: w.phase, Message: message, ObservedAt: time.Now().UTC(),
+		Stream: w.stream, Phase: w.phase, Message: line, ObservedAt: time.Now().UTC(),
 	})
 }
 
@@ -658,30 +804,12 @@ func (w *lineFrameWriter) scheduleFlush() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.timer = nil
-		_ = w.emitLogical()
+		line := string(w.pending)
+		w.pending = nil
+		if strings.TrimSpace(line) != "" {
+			_ = w.acceptLine(line)
+		}
 	})
-}
-
-func consoleLineContinues(previous, current string) bool {
-	previous = strings.TrimSpace(previous)
-	current = strings.TrimSpace(current)
-	if strings.HasSuffix(previous, ":") ||
-		strings.EqualFold(current, "with error:") ||
-		strings.EqualFold(current, "with error") {
-		return true
-	}
-	lowerPrevious := strings.ToLower(previous)
-	lowerCurrent := strings.ToLower(current)
-	if strings.Contains(lowerPrevious, "dlopen failed") ||
-		strings.Contains(lowerPrevious, "trying to load") {
-		return !strings.HasPrefix(current, "[")
-	}
-	if strings.HasPrefix(current, "at ") || strings.HasPrefix(current, "caused by:") ||
-		strings.HasPrefix(current, "... ") || strings.HasPrefix(current, "File \"") {
-		return true
-	}
-	return strings.Contains(lowerPrevious, "with error:") &&
-		!strings.HasPrefix(lowerCurrent, "[")
 }
 
 var ansiSequence = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)

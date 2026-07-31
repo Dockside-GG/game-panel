@@ -16,6 +16,7 @@ import (
 type fileMutationRequest struct {
 	Path    string `json:"path"`
 	Content string `json:"content,omitempty"`
+	NewName string `json:"new_name,omitempty"`
 }
 
 func (s *Server) listServerFiles(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +139,32 @@ func (s *Server) createServerDirectory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteServerFile(w http.ResponseWriter, r *http.Request) {
 	s.mutateServerFile(w, r, "delete", s.engine.DeleteFile, http.StatusNoContent)
+}
+
+func (s *Server) renameServerFile(w http.ResponseWriter, r *http.Request) {
+	session, _ := sessionFromContext(r.Context())
+	if !canOperate(session.User.PanelRole) {
+		writeProblem(w, r, errForbidden)
+		return
+	}
+	serverID := chi.URLParam(r, "serverID")
+	if _, err := s.store.ServerByID(r.Context(), serverID); err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	var input fileMutationRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Path = strings.TrimSpace(input.Path)
+	input.NewName = strings.TrimSpace(input.NewName)
+	newPath, err := s.engine.RenameFile(r.Context(), serverID, input.Path, input.NewName)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	s.recordFileActivity(r, serverID, session.User.ID, "rename", input.Path+" -> "+newPath)
+	writeJSON(w, http.StatusOK, map[string]string{"path": newPath})
 }
 
 func (s *Server) mutateServerFile(

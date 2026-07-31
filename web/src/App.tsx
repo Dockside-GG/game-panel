@@ -4,16 +4,21 @@ import {
   ArrowRight,
   Boxes,
   Check,
+  ChevronRight,
   CircleGauge,
   Clock3,
   Copy,
   Cpu,
+  Download,
+  ExternalLink,
+  FileWarning,
   Eye,
   EyeOff,
   HardDrive,
   Info,
   KeyRound,
   MemoryStick,
+  PackageCheck,
   Plus,
   RotateCw,
   Server,
@@ -44,12 +49,16 @@ import {
   UserAvatar,
 } from "./components";
 import type {
+  BuildInfo,
   Dashboard,
   Invite,
   Session,
   SetupStatus,
   ServerSummary,
   SystemContainer,
+  SystemContainerLogs,
+  DiagnosticEntry,
+  PanelUpdate,
   User,
 } from "./types";
 import { serverPresentation } from "./server-presentation";
@@ -145,6 +154,7 @@ function LoginPage() {
         <small>Dockside Game Panel · Self-hosted by design</small>
       </section>
       <main className="auth-main">
+        <div className="mobile-auth-brand"><Brand /></div>
         <div className="auth-card">
           {status.isLoading ? (
             <span className="loader" />
@@ -508,22 +518,27 @@ function FleetHealthPanel({ servers, loading }: { servers: ServerSummary[]; load
       <div><span className="eyebrow">FLEET HEALTH</span><h2>Live game-server resources</h2></div>
       <StatusBadge tone={servers.some((server) => serverPresentation(server).warning) ? "warning" : "success"}>{servers.length} visible</StatusBadge>
     </div>
-    {loading ? <TableLoading /> : servers.length ? <div className="dashboard-server-meters">
+    {loading ? <TableLoading /> : servers.length ? <div className="dashboard-fleet-table-wrap"><table className="dashboard-fleet-table">
+      <thead><tr><th>Server</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>I/O</th><th><span className="sr-only">Open</span></th></tr></thead>
+      <tbody>
       {servers.map((server) => {
         const cpuCapacity = server.resources.cpu_limit_millicores ? server.resources.cpu_limit_millicores / 10 : Math.max(server.runtime.cpu_percent ?? 0, 100);
         const cpu = cpuCapacity ? ((server.runtime.cpu_percent ?? 0) / cpuCapacity) * 100 : 0;
         const memoryCapacity = server.resources.memory_limit_bytes ?? server.runtime.memory_limit_bytes;
         const memory = memoryCapacity ? ((server.runtime.memory_bytes ?? 0) / memoryCapacity) * 100 : 0;
         const disk = server.resources.disk_limit_bytes ? ((server.runtime.disk_bytes ?? 0) / server.resources.disk_limit_bytes) * 100 : 0;
-        return <article key={server.id}>
-          <div className="dashboard-server-heading"><Link to={`/servers/${server.id}`}><strong>{server.name}</strong><span>{server.template_name}</span></Link><ServerStatus server={server} /></div>
-          <UsageMeter label="CPU" value={cpu} detail={`${formatPercent(server.runtime.cpu_percent)} current`} />
-          <UsageMeter label="Memory" value={memory} detail={`${formatBytes(server.runtime.memory_bytes)} / ${memoryCapacity ? formatBytes(memoryCapacity) : "unlimited"}`} available={Boolean(memoryCapacity)} />
-          <UsageMeter label="Disk" value={disk} detail={`${formatBytes(server.runtime.disk_bytes)}${server.resources.disk_limit_bytes ? ` / ${formatBytes(server.resources.disk_limit_bytes)}` : " · no alert limit"}`} available={Boolean(server.resources.disk_limit_bytes)} />
-          <small className="dashboard-server-io">Network {formatBytes((server.runtime.network_rx_bytes ?? 0) + (server.runtime.network_tx_bytes ?? 0))} · Block {formatBytes((server.runtime.block_read_bytes ?? 0) + (server.runtime.block_write_bytes ?? 0))}</small>
-        </article>;
+        return <tr key={server.id}>
+          <td data-label="Server"><Link className="dashboard-server-link" to={`/servers/${server.id}`}><strong>{server.name}</strong><span>{server.template_name}</span></Link></td>
+          <td data-label="Status"><ServerStatus server={server} /></td>
+          <td data-label="CPU"><UsageMeter label="CPU" value={cpu} detail={`${formatPercent(server.runtime.cpu_percent)} current`} /></td>
+          <td data-label="Memory"><UsageMeter label="Memory" value={memory} detail={`${formatBytes(server.runtime.memory_bytes)} / ${memoryCapacity ? formatBytes(memoryCapacity) : "unlimited"}`} available={Boolean(memoryCapacity)} /></td>
+          <td data-label="Disk"><UsageMeter label="Disk" value={disk} detail={`${formatBytes(server.runtime.disk_bytes)}${server.resources.disk_limit_bytes ? ` / ${formatBytes(server.resources.disk_limit_bytes)}` : " · no alert limit"}`} available={Boolean(server.resources.disk_limit_bytes)} /></td>
+          <td data-label="I/O"><small className="dashboard-server-io">Network {formatBytes((server.runtime.network_rx_bytes ?? 0) + (server.runtime.network_tx_bytes ?? 0))}<br />Block {formatBytes((server.runtime.block_read_bytes ?? 0) + (server.runtime.block_write_bytes ?? 0))}</small></td>
+          <td className="dashboard-server-open"><Link className="icon-button" to={`/servers/${server.id}`} aria-label={`Open ${server.name}`}><ChevronRight size={15} /></Link></td>
+        </tr>;
       })}
-    </div> : <EmptyState icon={Server} title="No live server telemetry yet" description="Provision a game server to see CPU, memory, disk, network, and block-I/O health here." />}
+      </tbody>
+    </table></div> : <EmptyState icon={Server} title="No live server telemetry yet" description="Provision a game server to see CPU, memory, disk, network, and block-I/O health here." />}
   </section>;
 }
 
@@ -543,7 +558,12 @@ function UsersPage() {
   });
   const installation = useQuery({
     queryKey: ["installation-settings"],
-    queryFn: () => api<{ mfa_policy: string }>("/api/v1/installation/settings"),
+    queryFn: () => api<{
+      public_url: string;
+      discord_client_id: string;
+      discord_secret_configured: boolean;
+      mfa_policy: string;
+    }>("/api/v1/installation/settings"),
   });
   return (
     <>
@@ -856,7 +876,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
         {!inviteURL ? (
           <>
             <p>The claimant stays pending with no panel visibility until you approve them.</p>
-            <label>Label <input value={label} maxLength={120} placeholder="Alex — Minecraft team" onChange={(event) => setLabel(event.target.value)} /></label>
+            <label>Label <input value={label} maxLength={120} placeholder="Alex — weekend moderators" onChange={(event) => setLabel(event.target.value)} /></label>
             <label>Expires after
               <select value={hours} onChange={(event) => setHours(Number(event.target.value))}>
                 <option value={1}>1 hour</option>
@@ -925,7 +945,12 @@ function PanelSettingsPage() {
   });
   const installation = useQuery({
     queryKey: ["installation-settings"],
-    queryFn: () => api<{ mfa_policy: string }>("/api/v1/installation/settings"),
+    queryFn: () => api<{
+      mfa_policy: string;
+      public_url: string;
+      discord_client_id: string;
+      discord_secret_configured: boolean;
+    }>("/api/v1/installation/settings"),
     enabled: session.data?.user.panel_role === "owner",
   });
   if (session.isLoading) return <PageLoading title="Panel settings" />;
@@ -945,6 +970,7 @@ function PanelSettingsPage() {
     <>
       <PageHeader eyebrow="INSTALLATION" title="Panel settings" description="Review the fixed installation origin and configure Discord security policy." />
       {installation.data && <MFASettings policy={installation.data.mfa_policy} />}
+      <PanelUpdateSettings />
       <section className="panel installation-details">
         <div className="panel-heading"><div><span className="eyebrow">AUTHENTICATION</span><h2>Discord OAuth2 application</h2></div><StatusBadge tone="success">identify only</StatusBadge></div>
         <dl className="host-details">
@@ -976,9 +1002,288 @@ function PanelSettingsPage() {
           <div><dt>Owner bootstrap</dt><dd>{setup.data?.bootstrap_enabled ? "Awaiting first claim" : "Consumed and disabled"}</dd></div>
         </dl>
       </section>
+      {installation.data && <DiscordOAuthSettings settings={installation.data} />}
       <section className="notice info">
-        The public URL and Discord client credentials are installation settings managed through <code>.env</code> and protected secret files. Use the upgrade/operations guide when changing them.
+        The public URL is selected during installation because it defines trusted browser origins, cookie security, and reverse-proxy routing. Discord credentials can be rotated above without restarting the panel.
       </section>
+    </>
+  );
+}
+
+function PanelUpdateSettings() {
+  const queryClient = useQueryClient();
+  const [includePrereleases, setIncludePrereleases] = useState(true);
+  const update = useQuery({
+    queryKey: ["panel-update", includePrereleases],
+    queryFn: () => api<PanelUpdate>(`/api/v1/installation/update?include_prereleases=${includePrereleases}`),
+    refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 3_000 : 60_000,
+    retry: (count, error) => count < 12 && error instanceof ApiError && error.status >= 500,
+  });
+  const check = useMutation({
+    mutationFn: () => api<PanelUpdate>("/api/v1/installation/update/check", {
+      method: "POST",
+      body: JSON.stringify({ include_prereleases: includePrereleases }),
+    }),
+    onSuccess: (result) => queryClient.setQueryData(["panel-update", includePrereleases], result),
+  });
+  const apply = useMutation({
+    mutationFn: (version: string) => api<PanelUpdate["status"]>("/api/v1/installation/update/apply", {
+      method: "POST",
+      body: JSON.stringify({ version, include_prereleases: includePrereleases }),
+    }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["panel-update"] });
+    },
+  });
+  const data = update.data;
+  const active = ["queued", "running"].includes(data?.status.state ?? "");
+  const latest = data?.check.latest;
+  const canApply = Boolean(data?.check.updates_supported && data.check.update_available && latest && !active && !apply.isPending);
+  const requestUpdate = () => {
+    if (!latest) return;
+    const warning = [
+      `Update Dockside from ${data?.build.version ?? "the current version"} to ${latest.version}?`,
+      "",
+      "The panel, worker, and running game servers will be stopped temporarily.",
+      "Dockside will first create one local pre-update recovery snapshot containing panel configuration and secrets, PostgreSQL, managed container images/configuration, system volumes, and all managed game-server volumes.",
+      "",
+      "Do not power off the host during this operation.",
+    ].join("\n");
+    if (window.confirm(warning)) apply.mutate(latest.version);
+  };
+  const statusTone: "danger" | "success" | "warning" | "info" = data?.status.state === "failed"
+    ? "danger"
+    : data?.status.state === "succeeded"
+      ? "success"
+      : active
+        ? "warning"
+        : "info";
+  return (
+    <section className="panel panel-update-settings">
+      <div className="panel-heading">
+        <div><span className="eyebrow">SOFTWARE</span><h2>Panel version & updates</h2></div>
+        <StatusBadge tone={statusTone}>{active ? data?.status.phase ?? "updating" : data?.status.state ?? "checking"}</StatusBadge>
+      </div>
+      {update.isLoading ? <TableLoading /> : update.isError ? (
+        <div className="panel-update-body"><ErrorPanel error={update.error} retry={() => void update.refetch()} /></div>
+      ) : data ? (
+        <div className="panel-update-body">
+          <div className="panel-update-version">
+            <span className="panel-update-icon"><PackageCheck size={24} /></span>
+            <div>
+              <span>Running version</span>
+              <strong>{data.build.version}</strong>
+              <small>Revision {data.build.revision === "unknown" ? "not embedded" : data.build.revision.slice(0, 12)} · Built {data.build.built_at === "unknown" ? "from source" : formatDate(data.build.built_at)}</small>
+            </div>
+          </div>
+          <div className="panel-update-controls">
+            <label className="checkbox-row">
+              <input type="checkbox" checked={includePrereleases} disabled={active} onChange={(event) => setIncludePrereleases(event.target.checked)} />
+              <span>Include alpha, beta, and release-candidate updates</span>
+            </label>
+            <button type="button" className="button secondary" disabled={check.isPending || active} onClick={() => check.mutate()}>
+              <RotateCw size={16} className={check.isPending ? "spin" : undefined} /> {check.isPending ? "Checking…" : "Check for updates"}
+            </button>
+          </div>
+          {!data.check.updates_supported ? (
+            <div className="notice warning">{data.check.reason}</div>
+          ) : latest ? (
+            <div className={`panel-release-card ${data.check.update_available ? "available" : ""}`}>
+              <div>
+                <span>{data.check.update_available ? "Update available" : "Latest published release"}</span>
+                <strong>{latest.name}</strong>
+                <small>{latest.prerelease ? "Pre-release" : "Stable"} · Published {formatDate(latest.published_at)}</small>
+              </div>
+              <div className="panel-release-actions">
+                <a className="button ghost" href={latest.url} target="_blank" rel="noreferrer">Release notes <ExternalLink size={15} /></a>
+                {data.check.update_available && (
+                  <button type="button" className="button primary" disabled={!canApply} onClick={requestUpdate}>
+                    <Download size={16} /> {apply.isPending ? "Starting…" : `Update to ${latest.version}`}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="notice info">No complete Dockside release with a signed archive and checksums is published for this channel.</div>
+          )}
+          {(active || data.status.state === "failed" || data.status.state === "succeeded") && (
+            <div className={`panel-update-progress ${data.status.state}`}>
+              <div><strong>{data.status.message || "Update status"}</strong><StatusBadge tone={statusTone}>{data.status.phase || data.status.state}</StatusBadge></div>
+              {active && <span className="indeterminate-progress"><i /></span>}
+              <small>Target {data.status.target_version || "—"} · Last update {formatDate(data.status.updated_at)}</small>
+              {data.status.snapshot_path && <small>Recovery snapshot: <code>{data.status.snapshot_path}</code></small>}
+              {data.status.error && <div className="form-error">{data.status.error}</div>}
+              {data.status.failure_recovery && <div className="notice warning">{data.status.failure_recovery}</div>}
+            </div>
+          )}
+          {apply.isError && <div className="form-error">{apply.error.message}</div>}
+          <p className="panel-update-footnote">
+            The updater accepts only published Dockside.GG GitHub releases, validates the versioned ZIP against <code>SHA256SUMS</code>, and retains exactly one completed pre-update snapshot. Existing game backups are left in place.
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function DiscordOAuthSettings({ settings }: {
+  settings: {
+    public_url: string;
+    discord_client_id: string;
+    discord_secret_configured: boolean;
+  };
+}) {
+  const queryClient = useQueryClient();
+  const [clientID, setClientID] = useState(settings.discord_client_id);
+  const [clientSecret, setClientSecret] = useState("");
+  const [showClientID, setShowClientID] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const callback = `${settings.public_url}/api/v1/auth/discord/callback`;
+  const save = useMutation({
+    mutationFn: () => api<void>("/api/v1/installation/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        discord_client_id: clientID.trim(),
+        discord_client_secret: clientSecret.trim() || undefined,
+      }),
+    }),
+    onSuccess: () => {
+      setClientSecret("");
+      void queryClient.invalidateQueries({ queryKey: ["installation-settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup-status"] });
+    },
+  });
+  return (
+    <section className="panel discord-settings">
+      <div className="panel-heading"><div><span className="eyebrow">EDIT AUTHENTICATION</span><h2>Discord credentials</h2></div><StatusBadge tone="success">Encrypted at rest</StatusBadge></div>
+      <div className="configuration-form">
+        <label>
+          Discord client ID
+          <span className="secret-input">
+            <input type={showClientID ? "text" : "password"} inputMode="numeric" value={clientID} onChange={(event) => setClientID(event.target.value.replace(/\D/g, ""))} />
+            <button type="button" className="icon-button" aria-label={showClientID ? "Hide Discord client ID" : "Show Discord client ID"} onClick={() => setShowClientID((value) => !value)}>{showClientID ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+          </span>
+        </label>
+        <label>
+          Replace Discord client secret
+          <span className="label-hint">Leave blank to keep the existing encrypted value. The saved secret is never returned to the browser.</span>
+          <span className="secret-input">
+            <input type={showSecret ? "text" : "password"} autoComplete="new-password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} placeholder={settings.discord_secret_configured ? "Secret configured" : "Enter client secret"} />
+            <button type="button" className="icon-button" aria-label={showSecret ? "Hide new Discord client secret" : "Show new Discord client secret"} onClick={() => setShowSecret((value) => !value)}>{showSecret ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+          </span>
+        </label>
+        <label>
+          Exact callback URI
+          <span className="copy-value"><code>{callback}</code><button type="button" className="button ghost compact" onClick={() => {
+            void navigator.clipboard.writeText(callback);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1800);
+          }}>{copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy"}</button></span>
+        </label>
+        <div className="notice info">Add this exact callback URI to the OAuth2 redirect list in the Discord developer portal. Changes take effect on the next sign-in attempt.</div>
+        {save.isError && <div className="form-error">{save.error.message}</div>}
+        {save.isSuccess && <div className="form-success">Discord authentication settings saved.</div>}
+        <div className="configuration-actions">
+          <button className="button primary" disabled={save.isPending || clientID.length < 17} onClick={() => save.mutate()}><ShieldCheck size={16} /> {save.isPending ? "Saving…" : "Save Discord settings"}</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DiagnosticsPage() {
+  const session = useSession();
+  const [component, setComponent] = useState("app");
+  const diagnostics = useQuery({
+    queryKey: ["diagnostics"],
+    queryFn: () => api<{ build: BuildInfo; entries: DiagnosticEntry[] }>("/api/v1/diagnostics?limit=250"),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? ""),
+    refetchInterval: 15_000,
+  });
+  const containers = useQuery({
+    queryKey: ["system-containers"],
+    queryFn: () => api<{ containers: SystemContainer[] }>("/api/v1/system/containers"),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? ""),
+    refetchInterval: 15_000,
+  });
+  const logs = useQuery({
+    queryKey: ["system-container-logs", component],
+    queryFn: () => api<SystemContainerLogs>(`/api/v1/system/containers/${component}/logs?tail=500`),
+    enabled: ["owner", "administrator"].includes(session.data?.user.panel_role ?? "") && Boolean(component),
+  });
+  if (session.isLoading) return <PageLoading title="Diagnostics" />;
+  if (!["owner", "administrator"].includes(session.data?.user.panel_role ?? "")) {
+    return (
+      <>
+        <PageHeader eyebrow="OPERATIONS" title="Diagnostics" description="Panel, engine, worker, and runtime failures." />
+        <section className="panel"><EmptyState icon={ShieldCheck} title="Administrator access required" description="The owner controls access by assigning the administrator panel role." /></section>
+      </>
+    );
+  }
+  const availableComponents = containers.data?.containers.map((item) => item.component) ?? [
+    "app", "worker", "engine", "gateway", "postgres",
+  ];
+  return (
+    <>
+      <PageHeader
+        eyebrow="OPERATIONS"
+        title="Diagnostics"
+        description="Sanitized panel, worker, engine, and Docker control-plane failures. Game process output remains in each server console and is never reclassified by the panel."
+        actions={<button className="button secondary" onClick={() => {
+          void diagnostics.refetch();
+          void containers.refetch();
+          void logs.refetch();
+        }}><RotateCw size={15} /> Refresh</button>}
+      />
+      {diagnostics.data?.build && (
+        <section className="panel">
+          <div className="panel-heading"><div><span className="eyebrow">BUILD</span><h2>Dockside release</h2></div><StatusBadge tone={diagnostics.data.build.version === "dev" ? "warning" : "success"}>{diagnostics.data.build.version}</StatusBadge></div>
+          <dl className="detail-list">
+            <div><dt>Version</dt><dd>{diagnostics.data.build.version}</dd></div>
+            <div><dt>Revision</dt><dd className="mono">{diagnostics.data.build.revision}</dd></div>
+            <div><dt>Built</dt><dd>{diagnostics.data.build.built_at === "unknown" ? "Development build" : diagnostics.data.build.built_at}</dd></div>
+          </dl>
+        </section>
+      )}
+      <div className="diagnostics-layout">
+        <section className="panel">
+          <div className="panel-heading"><div><span className="eyebrow">CONTROL PLANE</span><h2>Operational failures</h2></div><StatusBadge tone={diagnostics.data?.entries.length ? "warning" : "success"}>{diagnostics.data?.entries.length ?? 0} recent</StatusBadge></div>
+          {diagnostics.isLoading && <TableLoading />}
+          {diagnostics.isError && <ErrorPanel error={diagnostics.error} retry={() => void diagnostics.refetch()} />}
+          {diagnostics.data?.entries.length === 0 && <EmptyState icon={ShieldCheck} title="No operational failures" description="No failed operations, runtime infrastructure errors, or blocked background jobs were found." />}
+          <div className="diagnostic-list">
+            {diagnostics.data?.entries.map((item, index) => (
+              <article key={`${item.source}-${item.created_at}-${index}`}>
+                <FileWarning size={17} />
+                <div>
+                  <div><strong>{item.summary}</strong><StatusBadge tone={item.severity === "error" ? "danger" : "warning"}>{item.source}</StatusBadge></div>
+                  <code>{item.code}</code>
+                  {item.detail && <pre>{item.detail}</pre>}
+                  <span>{formatDate(item.created_at)}{item.server_id ? <> · <Link to={`/servers/${item.server_id}/activity`}>Open server</Link></> : null}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="panel system-log-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">CONTAINER LOGS</span><h2>Dockside services</h2></div>
+            <select aria-label="System container" value={component} onChange={(event) => setComponent(event.target.value)}>
+              {availableComponents.map((item) => <option value={item} key={item}>{item}</option>)}
+            </select>
+          </div>
+          <p className="section-description">Read-only tail from the selected system container. The web UI cannot stop or restart the app, engine, gateway, or database.</p>
+          {logs.isLoading && <TableLoading />}
+          {logs.isError && <ErrorPanel error={logs.error} retry={() => void logs.refetch()} />}
+          {logs.data && (
+            <div className="system-log-streams">
+              <details open><summary>Standard output</summary><pre>{logs.data.stdout || "No stdout in this tail."}</pre></details>
+              <details open={Boolean(logs.data.stderr)}><summary>Standard error</summary><pre>{logs.data.stderr || "No stderr in this tail."}</pre></details>
+            </div>
+          )}
+        </section>
+      </div>
     </>
   );
 }
@@ -1172,6 +1477,7 @@ export function App() {
         <Route path="/templates/:versionID/edit" element={<TemplateEditorPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/diagnostics" element={<DiagnosticsPage />} />
         <Route path="/settings" element={<PanelSettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -38,7 +38,7 @@ Docker socket access is host-root-equivalent. Compromising the engine container 
 - Container replacement is allowed only while stopped and preserves the labeled data volume.
 - Full deletion resolves the exact UUID-derived resource names and backup directory.
 
-Bundled compatibility does not make third-party game images or installation scripts trusted. Template definitions are snapshotted and validated for structure, but their installer commands and referenced images originate from their respective upstream projects. Review custom templates, pin images by digest for high-assurance deployments, and avoid granting game containers access to host paths or the Docker socket.
+Catalog compatibility does not make third-party game images or installation scripts trusted. Template definitions are snapshotted and validated for structure, but their installer commands and referenced images originate from their respective authors. Review local templates, pin images by digest for high-assurance deployments, and avoid granting game containers access to host paths or the Docker socket.
 
 ## Secrets
 

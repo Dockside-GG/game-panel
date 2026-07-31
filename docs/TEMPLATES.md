@@ -2,13 +2,52 @@
 
 Dockside templates describe how to install, configure, start, stop, expose, command, back up, and resource-limit a game server.
 
-The visual template builder is the recommended authoring interface. JSON import is available for version control, bulk authoring, and compatible Pelican or Pterodactyl definitions. The running panel stores template versions locally and does not download template definitions from a web catalog.
+The visual template builder is the recommended authoring interface. JSON
+upload/import and export are available for version control, sharing, bulk
+authoring, and compatible Pelican or Pterodactyl definitions. Releases embed
+offline snapshots of both compatibility libraries. The panel separately
+synchronizes original Dockside-native definitions from the public
+`Dockside-GG/game-panel-templates` repository and stores validated immutable
+versions in PostgreSQL.
 
 ## Compatibility model
 
-Dockside accepts the familiar top-level properties used by bundled Pelican and Pterodactyl definitions, normalizes them, and adds optional settings under a `dockside` object.
+Dockside accepts the familiar top-level properties used by Pelican and Pterodactyl definitions, normalizes them, and adds optional settings under a `dockside` object.
 
-Bundled templates remain immutable. Customizing one creates a Dockside-derived template. Editing a custom template creates another immutable version so existing servers retain their original provisioning definition.
+Catalog-managed templates remain immutable. Customizing one creates a local Dockside-derived template. Editing a local template creates another immutable version so existing servers retain their original provisioning definition. Exported customized templates use the Dockside format and preserve the explicit Dockside extensions.
+
+The panel core contains no per-game or distribution-platform provisioning
+rules. It does not assume that a server uses Steam or any other storefront.
+Images, installers, ports and protocols, startup behavior, command transports,
+backup defaults, and environment variables must be declared by the template.
+Compatibility imports can recognize generic allocation-shaped variables, but
+unknown port or protocol values remain unanswered for the provisioning form
+instead of being guessed from a game name.
+
+## Catalog synchronization and local templates
+
+The app first loads its release-bundled Pelican/Pterodactyl compatibility
+snapshots from embedded files. It then attempts to download `catalog.json` from
+`DOCKSIDE_TEMPLATE_CATALOG_URL` during startup and every
+`DOCKSIDE_TEMPLATE_SYNC_INTERVAL` (six hours by default). That remote catalog
+must contain only `source_kind: "dockside"` definitions. A remote failure is
+shown in catalog status and Diagnostics, but the panel starts with bundled,
+local, and previously synchronized definitions.
+
+Remote Dockside catalog updates are applied atomically. Removed remote
+definitions are archived, unchanged source digests reuse their immutable
+version, and changed definitions receive a new version. Bundled compatibility
+definitions are not overwritten by this sync. Templates created, imported,
+customized, or saved from a server are local Dockside templates and are never
+replaced by catalog synchronization.
+
+Owners and administrators can:
+
+- force a catalog sync from the Templates page;
+- upload or drag-and-drop a JSON definition;
+- export any template as Dockside JSON;
+- export the original compatible source for catalog-managed Pelican or Pterodactyl definitions;
+- create or customize templates through the visual editor.
 
 ## Complete example
 
@@ -53,6 +92,7 @@ Bundled templates remain immutable. Customizing one creates a Dockside-derived t
         "primary": true,
         "required": true,
         "published": true,
+        "internal_only": false,
         "environment": "SERVER_PORT"
       }
     ],
@@ -150,11 +190,21 @@ An array of portable container allocations:
 - `container_port`: port used by the game process.
 - `protocol`: `tcp` or `udp`.
 - `primary`: exactly one allocation must be primary.
-- `required`: prevents deselection during provisioning.
-- `published`: whether it is published by default.
+- `required`: requires this port to be published and prevents deselection during provisioning.
+- `published`: whether an optional public port is selected by default.
+- `internal_only`: prevents this listener from ever being published on the host.
 - `environment`: optional variable receiving the internal port.
 
 Host ports are intentionally not stored in templates. Dockside assigns a conflict-free host port when creating a server and checks both its database reservations and existing Docker publications.
+
+The visual editor presents four exposure policies:
+
+- **Required public:** `required: true`, `published: true`, `internal_only: false`.
+- **Optional, public by default:** `required: false`, `published: true`, `internal_only: false`.
+- **Optional, private by default:** `required: false`, `published: false`, `internal_only: false`. The person provisioning the server may opt to publish it.
+- **Internal only:** `required: false`, `published: false`, `internal_only: true`. The API rejects attempts to publish it.
+
+The primary game port is always required and public. An internal-only port cannot be primary, required, or published.
 
 ### `dockside.command_transport`
 
@@ -180,15 +230,46 @@ REST properties are placed in `rest`:
 - `body_template`: optional request body.
 - `headers`: optional header-name/value object.
 - `accepted_status`: optional exact successful status codes; otherwise all 2xx responses succeed.
+- `basic_auth`: optional `username` and `password_environment`. Dockside builds
+  the Basic Authorization header at execution time without storing the password
+  in the template.
+- `routes`: optional named command routes. When routes are present, the first
+  console word selects a route and the remaining text supplies its arguments.
 - `timeout_seconds`: 1–60 seconds.
+
+Each route supports:
+
+- `command`: primary lowercase console verb.
+- `aliases`: optional alternative verbs.
+- `usage`: usage text returned for missing arguments.
+- `min_args`: minimum whitespace-separated argument count.
+- `method`, `path`, `body_template`, `headers`, and `accepted_status`: request
+  values for that command. Route headers override transport headers.
 
 REST templates may use:
 
 - `{{COMMAND}}`: raw command, URL-encoded when used in the path.
 - `{{COMMAND_JSON}}`: command encoded as a JSON string.
+- `{{ARGS}}` and `{{ARGS_JSON}}`: everything after the command verb.
+- `{{ARG1}}`, `{{ARG1_JSON}}`, and `{{ARG1_INT}}`: a numbered
+  whitespace-separated argument as raw text, a JSON string, or a validated
+  integer.
+- `{{ARGS_AFTER_1}}` and `{{ARGS_AFTER_1_JSON}}`: everything after a numbered
+  argument.
 - `{{ENV:VARIABLE_NAME}}`: stored server environment value.
 
 REST transports cannot specify a hostname or external URL. The request runs through a short-lived helper sharing the game container network namespace and can only contact `127.0.0.1`.
+
+A REST transport does not need a `network_ports` entry merely so the panel can call it. Use the transport's `port` or `port_environment` and leave the HTTP service reachable only on localhost inside the game container. If operators may optionally expose that REST endpoint, add a matching optional/private network port. If it must never be reachable through a host port, mark that network port `internal_only: true`.
+
+## Visual and raw editing
+
+The create, customize, and edit pages support both:
+
+- **Visual editor:** guided forms for identity, images, install/startup behavior, network exposure, variables, command transport, backup defaults, and resource defaults.
+- **Raw JSON:** the complete Dockside-compatible JSON document with formatting and server-side validation.
+
+Switching from visual to raw JSON serializes the current form. Switching back parses the JSON into the visual fields; invalid or incomplete JSON remains in the raw editor with an error so it is not silently discarded. Compatible top-level fields that the visual form does not manage, such as `features` and `file_denylist`, are preserved.
 
 ### `dockside.backup_defaults`
 
@@ -220,7 +301,7 @@ It excludes secret values, credentials, Discord webhook URLs, host port assignme
 - Declare the correct TCP or UDP protocol.
 - Keep environment names uppercase and unique.
 - Never place a credential directly in JSON.
-- Use an internal REST port rather than a published host port.
+- Use an internal-only REST port rather than a published host port unless external API access is intentional.
 - Keep backup paths relative to `/home/container`.
 - Use pinned image versions or digests for reproducible production-oriented testing.
 - Test installation, first start, restart, graceful stop, command delivery, backup, restore, and a second server on the same host before sharing a template.

@@ -43,6 +43,7 @@ const navigation = [
   { to: "/templates", label: "Templates", icon: Library },
   { to: "/users", label: "Users & access", icon: Users, ownerOnly: true },
   { to: "/activity", label: "Activity", icon: Activity },
+  { to: "/diagnostics", label: "Diagnostics", icon: ShieldCheck, administratorOnly: true },
   { to: "/settings", label: "Panel settings", icon: Settings, ownerOnly: true },
 ];
 
@@ -95,7 +96,12 @@ export function AppShell({ session }: { session: Session }) {
         </div>
         <nav aria-label="Main navigation">
           {navigation
-            .filter((item) => !item.ownerOnly || session.user.panel_role === "owner")
+            .filter((item) =>
+              (!item.ownerOnly || session.user.panel_role === "owner") &&
+              (!item.administratorOnly ||
+                session.user.panel_role === "owner" ||
+                session.user.panel_role === "administrator")
+            )
             .map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}

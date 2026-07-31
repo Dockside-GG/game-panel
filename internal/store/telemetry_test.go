@@ -43,3 +43,23 @@ func TestRecoveryDelayIsBounded(t *testing.T) {
 		t.Fatalf("recoveryDelay(99) = %s", got)
 	}
 }
+
+func TestNextRecoveryAttemptStaysInPersistentMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		current int
+		want    int
+	}{
+		{current: -1, want: 1},
+		{current: 0, want: 1},
+		{current: 1, want: 2},
+		{current: 4, want: 5},
+		{current: 5, want: 5},
+		{current: 99, want: 5},
+	}
+	for _, test := range tests {
+		if got := nextRecoveryAttempt(test.current); got != test.want {
+			t.Fatalf("nextRecoveryAttempt(%d) = %d, want %d", test.current, got, test.want)
+		}
+	}
+}

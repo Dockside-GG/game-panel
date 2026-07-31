@@ -21,6 +21,14 @@ $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $EnvPath = Join-Path $ProjectRoot ".env"
 $SecretsPath = Join-Path $ProjectRoot "secrets"
 $GeneratedPath = Join-Path $ProjectRoot "deploy\generated"
+$ReleaseMetadataPath = Join-Path $ProjectRoot ".dockside-release"
+$ReleaseVersion = ""
+if (Test-Path -LiteralPath $ReleaseMetadataPath) {
+    $ReleaseVersion = [IO.File]::ReadAllText($ReleaseMetadataPath).Trim()
+    if ($ReleaseVersion -notmatch "^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$") {
+        throw "The release bundle contains invalid version metadata."
+    }
+}
 
 function Read-Choice {
     param([string]$Prompt, [string[]]$Options, [int]$Default = 0)
@@ -186,7 +194,14 @@ if ($GamePortEnd -eq 0) { $GamePortEnd = [int](Read-Default "Last game-server ho
 if ($GamePortStart -lt 1024 -or $GamePortEnd -gt 65535 -or $GamePortStart -gt $GamePortEnd) {
     throw "The game port range must be between 1024 and 65535."
 }
-if (-not $Version) { $Version = Read-Default "Panel image version (use dev to build this checkout)" "dev" }
+if (-not $Version) {
+    if ($ReleaseVersion) {
+        $Version = $ReleaseVersion
+        Write-Host "Using release bundle version $Version."
+    } else {
+        $Version = Read-Default "Panel image version (use dev to build this checkout)" "dev"
+    }
+}
 if ($Version -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") {
     throw "The panel image version contains unsupported characters."
 }
