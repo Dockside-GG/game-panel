@@ -45,12 +45,6 @@ jobs:
       - name: Verify Go modules
         run: go mod verify
 
-      - name: Run Go tests
-        run: go test ./cmd/... ./internal/... ./templates/...
-
-      - name: Run Go vet
-        run: go vet ./cmd/... ./internal/... ./templates/...
-
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -65,8 +59,22 @@ jobs:
       - name: Lint web application
         run: corepack pnpm --dir web lint
 
-      - name: Build web application
+      - name: Build embedded web application
         run: corepack pnpm --dir web build
+
+      - name: Verify embedded web assets
+        shell: bash
+        run: |
+          test -f internal/webui/dist/index.html || {
+            echo "::error::The web build did not create internal/webui/dist/index.html"
+            exit 1
+          }
+
+      - name: Run Go tests
+        run: go test ./cmd/... ./internal/... ./templates/...
+
+      - name: Run Go vet
+        run: go vet ./cmd/... ./internal/... ./templates/...
 
   windows-installer:
     name: Windows installer
