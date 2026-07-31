@@ -9,6 +9,7 @@ secrets/
 *.p12
 *.pfx
 *.jks
+.cache/
 
 # Runtime state and user data
 data/
