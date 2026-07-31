@@ -1,0 +1,350 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      built_at: ${{ steps.version.outputs.built_at }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and release metadata
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+
+          if [[ ! "$tag" =~ $semver ]]; then
+            echo "::error::Tag must be a Semantic Version such as v0.1.0-alpha.1"
+            exit 1
+          fi
+
+          version="${tag#v}"
+          package_version="$(jq -r '.version' web/package.json)"
+
+          if [[ "$package_version" != "$version" ]]; then
+            echo "::error::web/package.json is $package_version; tag is $version"
+            exit 1
+          fi
+
+          grep -Fq "## [$version]" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md does not contain [$version]"
+            exit 1
+          }
+
+          test -f "docs/releases/v${version}.md" || {
+            echo "::error::Missing docs/releases/v${version}.md"
+            exit 1
+          }
+
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::The tagged commit is not contained in main"
+            exit 1
+          }
+
+          commit_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          built_at="$(date -u -d "@$commit_epoch" +'%Y-%m-%dT%H:%M:%SZ')"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "built_at=$built_at" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify tagged source
+    needs:
+      - prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Verify Go formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify and test Go code
+        shell: bash
+        run: |
+          go mod verify
+          go test ./cmd/... ./internal/... ./templates/...
+          go vet ./cmd/... ./internal/... ./templates/...
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.14.0"
+
+      - name: Build web application
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm --dir web install --frozen-lockfile
+          corepack pnpm --dir web lint
+          corepack pnpm --dir web build
+
+      - name: Test Linux installer
+        shell: bash
+        run: |
+          chmod +x scripts/install.sh scripts/tests/install-smoke.sh
+          bash scripts/tests/install-smoke.sh
+
+      - name: Validate Compose configurations
+        shell: bash
+        run: |
+          cp .env.example .env
+          mkdir -p secrets
+          for name in postgres_password database_url encryption_key session_key discord_client_secret bootstrap_token engine_token; do
+            printf 'release-placeholder\n' > "secrets/$name"
+          done
+
+          docker compose --env-file .env config --quiet
+          docker compose --env-file .env \
+            -f compose.yml -f compose.dev.yml config --quiet
+          docker compose --env-file .env \
+            -f compose.yml -f compose.public.yml config --quiet
+
+  windows-installer:
+    name: Verify Windows installer
+    needs:
+      - prepare
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Test Windows installer
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File .\scripts\tests\install-smoke.ps1
+
+  package:
+    name: Build release assets
+    needs:
+      - prepare
+      - verify
+      - windows-installer
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Generate SPDX source SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: artifacts/dockside-game-panel-${{ needs.prepare.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Build installation archives
+        shell: bash
+        run: |
+          chmod +x scripts/package-release.sh
+          scripts/package-release.sh "$VERSION"
+
+      - name: Complete and verify checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum "dockside-game-panel-${VERSION}.spdx.json" >> SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Inspect archive contents
+        shell: bash
+        run: |
+          unzip -t "artifacts/dockside-game-panel-${VERSION}.zip"
+          tar -tzf "artifacts/dockside-game-panel-${VERSION}.tar.gz" >/dev/null
+
+          unzip -p \
+            "artifacts/dockside-game-panel-${VERSION}.zip" \
+            "dockside-game-panel-${VERSION}/.dockside-release" |
+            grep -Fx "$VERSION"
+
+          tar -xOf \
+            "artifacts/dockside-game-panel-${VERSION}.tar.gz" \
+            "dockside-game-panel-${VERSION}/.dockside-release" |
+            grep -Fx "$VERSION"
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: "artifacts/*"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  images:
+    name: Build image / ${{ matrix.target }}
+    needs:
+      - prepare
+      - verify
+      - windows-installer
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: app
+            image: ghcr.io/dockside-gg/game-panel
+          - target: worker
+            image: ghcr.io/dockside-gg/game-panel-worker
+          - target: engine
+            image: ghcr.io/dockside-gg/game-panel-engine
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ matrix.image }}:${{ needs.prepare.outputs.version }}
+            ${{ matrix.image }}:sha-${{ github.sha }}
+          build-args: |
+            DOCKSIDE_VERSION=${{ needs.prepare.outputs.version }}
+            DOCKSIDE_REVISION=${{ github.sha }}
+            DOCKSIDE_BUILT_AT=${{ needs.prepare.outputs.built_at }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest container image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  draft-release:
+    name: Create draft GitHub release
+    needs:
+      - prepare
+      - verify
+      - windows-installer
+      - package
+      - images
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@v6
+
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: artifacts
+
+      - name: Create draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets=(
+            "artifacts/dockside-game-panel-${VERSION}.zip"
+            "artifacts/dockside-game-panel-${VERSION}.tar.gz"
+            "artifacts/dockside-game-panel-${VERSION}.spdx.json"
+            "artifacts/SHA256SUMS"
+          )
+
+          prerelease_args=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            "${assets[@]}" \
+            --draft \
+            --latest=false \
+            --verify-tag \
+            --title "Dockside $GITHUB_REF_NAME" \
+            --notes-file "docs/releases/v${VERSION}.md" \
+            "${prerelease_args[@]}"
