@@ -104,7 +104,7 @@ The normal integrated UI is embedded into the Go application during the Docker b
 
 ## Database schema during early development
 
-Until `v0.1.0-alpha.1` is published, update the existing base SQL under `internal/db/migrations` directly and recreate the disposable development PostgreSQL volume after schema changes. The first published alpha establishes the upgrade boundary: after it ships, freeze `0001_initial.sql` and add new forward-only migrations for every schema change. Do not rewrite migrations that have appeared in a release.
+Until `v0.1.0-alpha.2` is published, update the existing base SQL under `internal/db/migrations` directly and recreate the disposable development PostgreSQL volume after schema changes. The first published alpha establishes the upgrade boundary: after it ships, freeze `0001_initial.sql` and add new forward-only migrations for every schema change. Do not rewrite migrations that have appeared in a release.
 
 Never place credentials or environment-specific values in schema SQL.
 

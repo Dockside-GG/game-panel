@@ -8,7 +8,7 @@ documented.
 
 ## Unreleased
 
-## [0.1.0-alpha.1] - 2026-07-31
+## [0.1.0-alpha.2] - 2026-07-31
 
 ### Added
 
@@ -37,5 +37,5 @@ documented.
 - Docker socket access is isolated to the engine service.
 - Runtime secrets are file-backed and local configuration is ignored by Git.
 
-[Unreleased]: https://github.com/Dockside-GG/game-panel/compare/v0.1.0-alpha.1...HEAD
-[0.1.0-alpha.1]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.1
+[Unreleased]: https://github.com/Dockside-GG/game-panel/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.2

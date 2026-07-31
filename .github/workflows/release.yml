@@ -181,6 +181,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+      artifact-metadata: write
 
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -188,6 +189,10 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v6
+
+      - name: Prepare release asset directory
+        shell: bash
+        run: mkdir -p artifacts
 
       - name: Generate SPDX source SBOM
         uses: anchore/sbom-action@v0
@@ -253,6 +258,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
 
     strategy:
       fail-fast: false
