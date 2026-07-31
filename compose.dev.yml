@@ -1,0 +1,23 @@
+services:
+  gateway:
+    ports:
+      - "${DOCKSIDE_BIND_ADDRESS:-127.0.0.1}:${DOCKSIDE_HTTP_PORT:-8080}:80"
+
+  app:
+    build:
+      target: app
+    environment:
+      DOCKSIDE_LOG_LEVEL: debug
+      DOCKSIDE_SECURE_COOKIES: "false"
+
+  worker:
+    build:
+      target: worker
+    environment:
+      DOCKSIDE_LOG_LEVEL: debug
+
+  engine:
+    build:
+      target: engine
+    environment:
+      DOCKSIDE_LOG_LEVEL: debug

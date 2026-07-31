@@ -1,0 +1,67 @@
+name: Template compatibility report
+description: Report a Pelican, Pterodactyl, or Dockside template problem
+title: "[Template]: "
+labels:
+  - templates
+body:
+  - type: dropdown
+    id: source
+    attributes:
+      label: Template format
+      options:
+        - Dockside
+        - Pelican-compatible
+        - Pterodactyl-compatible
+    validations:
+      required: true
+  - type: input
+    id: template
+    attributes:
+      label: Template name and game
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dockside version
+      placeholder: Release tag or Git commit
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Failure stage
+      options:
+        - Import or normalization
+        - Configuration
+        - Port allocation
+        - Installation
+        - Startup
+        - Console command transport
+        - Backup or restore
+        - Runtime
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Behavior and reproduction
+      description: Explain what fails and how to reproduce it on a disposable server.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized template fragment or logs
+      description: Remove passwords, tokens, webhook URLs, public IPs, player data, and private files.
+      render: json
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Safety checks
+      options:
+        - label: I reproduced this with a newly created disposable server.
+          required: true
+        - label: I removed secrets, personal information, and private server data.
+          required: true

@@ -1,0 +1,14 @@
+services:
+  engine:
+    networks:
+      - control
+      - edge
+    ports:
+      - "127.0.0.1:${DOCKSIDE_ENGINE_TEST_PORT:-18081}:8081"
+
+  postgres:
+    networks:
+      - control
+      - edge
+    ports:
+      - "127.0.0.1:${DOCKSIDE_POSTGRES_TEST_PORT:-15432}:5432"

@@ -1,0 +1,215 @@
+name: ${COMPOSE_PROJECT_NAME:-dockside}
+
+services:
+  gateway:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DOCKSIDE_PUBLIC_URL: ${DOCKSIDE_PUBLIC_URL:-http://localhost:8080}
+      DOCKSIDE_HOSTNAME: ${DOCKSIDE_HOSTNAME:-localhost}
+      DOCKSIDE_ACME_EMAIL: ${DOCKSIDE_ACME_EMAIL:-}
+    ports:
+      - "${DOCKSIDE_BIND_ADDRESS:-127.0.0.1}:${DOCKSIDE_HTTP_PORT:-8080}:80"
+    volumes:
+      - ${DOCKSIDE_CADDYFILE:-./deploy/caddy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      gg.dockside.system: "true"
+      gg.dockside.instance: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      gg.dockside.component: gateway
+
+  app:
+    image: ghcr.io/dockside-gg/game-panel:${DOCKSIDE_VERSION:-dev}
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      engine:
+        condition: service_healthy
+    environment:
+      DOCKSIDE_COMPONENT: app
+      DOCKSIDE_INSTANCE_ID: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      DOCKSIDE_PUBLIC_URL: ${DOCKSIDE_PUBLIC_URL:?DOCKSIDE_PUBLIC_URL is required}
+      DOCKSIDE_DATABASE_URL_FILE: /run/secrets/database_url
+      DOCKSIDE_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      DOCKSIDE_SESSION_KEY_FILE: /run/secrets/session_key
+      DOCKSIDE_DISCORD_CLIENT_ID: ${DOCKSIDE_DISCORD_CLIENT_ID:?DOCKSIDE_DISCORD_CLIENT_ID is required}
+      DOCKSIDE_MFA_POLICY: ${DOCKSIDE_MFA_POLICY:-administrators}
+      DOCKSIDE_DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord_client_secret
+      DOCKSIDE_BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap_token
+      DOCKSIDE_ENGINE_TOKEN_FILE: /run/secrets/engine_token
+      DOCKSIDE_ENGINE_URL: http://engine:8081
+      DOCKSIDE_GAME_PORT_START: ${DOCKSIDE_GAME_PORT_START:-20000}
+      DOCKSIDE_GAME_PORT_END: ${DOCKSIDE_GAME_PORT_END:-29999}
+      DOCKSIDE_SERVER_UID: ${DOCKSIDE_SERVER_UID:-1000}
+      DOCKSIDE_SERVER_GID: ${DOCKSIDE_SERVER_GID:-1000}
+      DOCKSIDE_LOG_LEVEL: ${DOCKSIDE_LOG_LEVEL:-info}
+      DOCKSIDE_SECURE_COOKIES: ${DOCKSIDE_SECURE_COOKIES:-true}
+    secrets:
+      - database_url
+      - encryption_key
+      - session_key
+      - discord_client_secret
+      - bootstrap_token
+      - engine_token
+    networks:
+      - edge
+      - control
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      gg.dockside.system: "true"
+      gg.dockside.instance: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      gg.dockside.component: app
+    healthcheck:
+      test: ["CMD", "/dockside", "healthcheck", "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    image: ghcr.io/dockside-gg/game-panel-worker:${DOCKSIDE_VERSION:-dev}
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      engine:
+        condition: service_healthy
+    environment:
+      DOCKSIDE_COMPONENT: worker
+      DOCKSIDE_INSTANCE_ID: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      DOCKSIDE_DATABASE_URL_FILE: /run/secrets/database_url
+      DOCKSIDE_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      DOCKSIDE_ENGINE_TOKEN_FILE: /run/secrets/engine_token
+      DOCKSIDE_ENGINE_URL: http://engine:8081
+      DOCKSIDE_LOG_LEVEL: ${DOCKSIDE_LOG_LEVEL:-info}
+    secrets:
+      - database_url
+      - encryption_key
+      - engine_token
+    networks:
+      - control
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      gg.dockside.system: "true"
+      gg.dockside.instance: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      gg.dockside.component: worker
+
+  engine:
+    image: ghcr.io/dockside-gg/game-panel-engine:${DOCKSIDE_VERSION:-dev}
+    build:
+      context: .
+      target: engine
+    restart: unless-stopped
+    environment:
+      DOCKSIDE_COMPONENT: engine
+      DOCKSIDE_INSTANCE_ID: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      DOCKSIDE_ENGINE_TOKEN_FILE: /run/secrets/engine_token
+      DOCKSIDE_SERVER_DATA_ROOT: /var/lib/dockside/servers
+      DOCKSIDE_BACKUP_ROOT: /var/lib/dockside/backups
+      DOCKSIDE_GAME_PORT_START: ${DOCKSIDE_GAME_PORT_START:-20000}
+      DOCKSIDE_GAME_PORT_END: ${DOCKSIDE_GAME_PORT_END:-29999}
+      DOCKSIDE_SERVER_UID: ${DOCKSIDE_SERVER_UID:-1000}
+      DOCKSIDE_SERVER_GID: ${DOCKSIDE_SERVER_GID:-1000}
+      DOCKSIDE_LOG_LEVEL: ${DOCKSIDE_LOG_LEVEL:-info}
+    secrets:
+      - engine_token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKSIDE_HOST_DATA_ROOT:-./data/servers}:/var/lib/dockside/servers
+      - ${DOCKSIDE_HOST_BACKUP_ROOT:-./data/backups}:/var/lib/dockside/backups
+    group_add:
+      - "${DOCKSIDE_DOCKER_GID:-0}"
+    networks:
+      - control
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      gg.dockside.system: "true"
+      gg.dockside.instance: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      gg.dockside.component: engine
+    healthcheck:
+      test: ["CMD", "/dockside-engine", "healthcheck", "http://127.0.0.1:8081/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DOCKSIDE_POSTGRES_DB:-dockside}
+      POSTGRES_USER: ${DOCKSIDE_POSTGRES_USER:-dockside}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - control
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      gg.dockside.system: "true"
+      gg.dockside.instance: ${DOCKSIDE_INSTANCE_ID:?DOCKSIDE_INSTANCE_ID is required}
+      gg.dockside.component: postgres
+
+networks:
+  edge:
+  control:
+    internal: true
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  postgres_password:
+    file: ${DOCKSIDE_POSTGRES_PASSWORD_HOST_FILE:-./secrets/postgres_password}
+  database_url:
+    file: ${DOCKSIDE_DATABASE_URL_HOST_FILE:-./secrets/database_url}
+  encryption_key:
+    file: ${DOCKSIDE_ENCRYPTION_KEY_HOST_FILE:-./secrets/encryption_key}
+  session_key:
+    file: ${DOCKSIDE_SESSION_KEY_HOST_FILE:-./secrets/session_key}
+  discord_client_secret:
+    file: ${DOCKSIDE_DISCORD_CLIENT_SECRET_HOST_FILE:-./secrets/discord_client_secret}
+  bootstrap_token:
+    file: ${DOCKSIDE_BOOTSTRAP_TOKEN_HOST_FILE:-./secrets/bootstrap_token}
+  engine_token:
+    file: ${DOCKSIDE_ENGINE_TOKEN_HOST_FILE:-./secrets/engine_token}
