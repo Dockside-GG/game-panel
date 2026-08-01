@@ -145,7 +145,7 @@ Read [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md) befor
 
 ## Project status and versioning
 
-The first public target is `v0.1.0-alpha.2`. Versions below `1.0.0` remain early-development software and may contain documented breaking changes. Published container tags and release archives are immutable; source builds identify themselves as `dev`.
+The current release candidate is `v0.1.0-alpha.3`. Versions below `1.0.0` remain early-development software and may contain documented breaking changes. Published container tags and release archives are immutable; source builds identify themselves as `dev`.
 
 See [Versioning and releases](docs/VERSIONING.md), [Release process](docs/RELEASING.md), and the [changelog](CHANGELOG.md).
 
@@ -155,6 +155,7 @@ See [Versioning and releases](docs/VERSIONING.md), [Release process](docs/RELEAS
 - [Developer README](docs/DEVELOPMENT.md)
 - [Release process](docs/RELEASING.md)
 - [Panel updates and recovery snapshots](docs/UPDATES.md)
+- [v0.1.0-alpha.3 release notes](docs/releases/v0.1.0-alpha.3.md)
 - [v0.1.0-alpha.2 release notes](docs/releases/v0.1.0-alpha.2.md)
 - [Contributing](CONTRIBUTING.md)
 - [Versioning and releases](docs/VERSIONING.md)

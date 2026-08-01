@@ -5,6 +5,10 @@ Dockside release installations can check for and apply published updates from
 see or start this operation. Development and test Compose projects are
 deliberately excluded; contributors update those installations from Git.
 
+The installed version and retained update status are read locally when Panel
+Settings opens. Dockside contacts GitHub only when the owner selects **Check
+for updates**, then polls only while an accepted update is actively running.
+
 > [!CAUTION]
 > An update causes downtime and may require substantial temporary disk space.
 > Maintain an independent, tested backup outside this host. The updater's local

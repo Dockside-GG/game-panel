@@ -26,7 +26,17 @@ type applyPanelUpdateRequest struct {
 }
 
 func (s *Server) panelUpdate(w http.ResponseWriter, r *http.Request) {
-	s.writePanelUpdate(w, r, false, queryBoolean(r, "include_prereleases"))
+	build := buildinfo.Current()
+	status, err := s.engine.PanelUpdateStatus(r.Context())
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, panelUpdateResponse{
+		Build: build,
+		Check: s.updates.Current(build.Version, queryBoolean(r, "include_prereleases")),
+		Status: status,
+	})
 }
 
 func (s *Server) checkPanelUpdate(w http.ResponseWriter, r *http.Request) {

@@ -142,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 			active.With(s.requireServerPermission("server.databases.manage"), s.requireCSRF).Post("/servers/{serverID}/databases/{databaseID}/password", s.rotateServerDatabasePassword)
 			active.With(s.requireServerPermission("server.view")).Get("/servers/{serverID}/schedules", s.listSchedules)
 			active.With(s.requireServerPermission("server.schedules.manage"), s.requireCSRF).Post("/servers/{serverID}/schedules", s.createSchedule)
+			active.With(s.requireServerPermission("server.schedules.manage"), s.requireCSRF).Put("/servers/{serverID}/schedules/{scheduleID}", s.updateSchedule)
 			active.With(s.requireServerPermission("server.schedules.manage"), s.requireCSRF).Patch("/servers/{serverID}/schedules/{scheduleID}", s.setScheduleEnabled)
 			active.With(s.requireServerPermission("server.schedules.manage"), s.requireCSRF).Post("/servers/{serverID}/schedules/{scheduleID}/run", s.runScheduleNow)
 			active.With(s.requireServerPermission("server.schedules.manage"), s.requireCSRF).Delete("/servers/{serverID}/schedules/{scheduleID}", s.deleteSchedule)

@@ -8,7 +8,54 @@ documented.
 
 ## Unreleased
 
+## [0.1.0-alpha.3] - 2026-07-31
+
+### Added
+
+- Existing schedules can now be edited through the same visual cron builder
+  used to create them.
+- Scheduled backup names now include the run date, time, and schedule timezone
+  so every generated archive is easy to identify.
+
+### Changed
+
+- The schedule list now uses the full server page width and opens create/edit
+  forms in a focused modal.
+- Panel version information loads locally and immediately. GitHub release
+  checks are manual, idle polling has been removed, and active updates remain
+  live-polled until completion.
+- Panel update controls now appear below Discord authentication settings and
+  clearly identify development builds that must be updated from source.
+- Server cards have a larger desktop minimum width and less compressed live
+  metrics while retaining responsive mobile behavior.
+
+### Fixed
+
+- The Console command schedule task option is no longer clipped.
+- Disabled schedules no longer retain a misleading next-run timestamp.
+- Development builds no longer contact GitHub or retry remote update checks
+  before reporting their local `dev` version.
+- Scheduled backup retention remains attached to every distinct run; expired
+  unlocked archives continue to be removed automatically by the worker.
+
 ## [0.1.0-alpha.2] - 2026-07-31
+
+### Fixed
+
+- Release packaging now creates its artifact output directory before generating
+  the SPDX source SBOM.
+- Release archive and container-image jobs now declare the GitHub permissions
+  required to publish artifact metadata and build attestations.
+
+### Changed
+
+- Release references, package metadata, and installation examples were advanced
+  to `0.1.0-alpha.2` instead of moving or reusing the immutable `alpha.1` tag.
+- `alpha.2` supersedes `alpha.1` as the first supported downloadable public
+  alpha because the original release workflow did not finish publishing all
+  required assets.
+
+## [0.1.0-alpha.1] - 2026-07-31
 
 ### Added
 
@@ -37,5 +84,7 @@ documented.
 - Docker socket access is isolated to the engine service.
 - Runtime secrets are file-backed and local configuration is ignored by Git.
 
-[Unreleased]: https://github.com/Dockside-GG/game-panel/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/Dockside-GG/game-panel/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.1

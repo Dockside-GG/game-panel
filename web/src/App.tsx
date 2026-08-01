@@ -970,7 +970,6 @@ function PanelSettingsPage() {
     <>
       <PageHeader eyebrow="INSTALLATION" title="Panel settings" description="Review the fixed installation origin and configure Discord security policy." />
       {installation.data && <MFASettings policy={installation.data.mfa_policy} />}
-      <PanelUpdateSettings />
       <section className="panel installation-details">
         <div className="panel-heading"><div><span className="eyebrow">AUTHENTICATION</span><h2>Discord OAuth2 application</h2></div><StatusBadge tone="success">identify only</StatusBadge></div>
         <dl className="host-details">
@@ -1006,6 +1005,7 @@ function PanelSettingsPage() {
       <section className="notice info">
         The public URL is selected during installation because it defines trusted browser origins, cookie security, and reverse-proxy routing. Discord credentials can be rotated above without restarting the panel.
       </section>
+      <PanelUpdateSettings />
     </>
   );
 }
@@ -1016,8 +1016,8 @@ function PanelUpdateSettings() {
   const update = useQuery({
     queryKey: ["panel-update", includePrereleases],
     queryFn: () => api<PanelUpdate>(`/api/v1/installation/update?include_prereleases=${includePrereleases}`),
-    refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 3_000 : 60_000,
-    retry: (count, error) => count < 12 && error instanceof ApiError && error.status >= 500,
+    refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 3_000 : false,
+    retry: false,
   });
   const check = useMutation({
     mutationFn: () => api<PanelUpdate>("/api/v1/installation/update/check", {
@@ -1038,6 +1038,7 @@ function PanelUpdateSettings() {
   const data = update.data;
   const active = ["queued", "running"].includes(data?.status.state ?? "");
   const latest = data?.check.latest;
+  const checked = Boolean(data?.check.checked_at && !data.check.checked_at.startsWith("0001-"));
   const canApply = Boolean(data?.check.updates_supported && data.check.update_available && latest && !active && !apply.isPending);
   const requestUpdate = () => {
     if (!latest) return;
@@ -1062,7 +1063,13 @@ function PanelUpdateSettings() {
     <section className="panel panel-update-settings">
       <div className="panel-heading">
         <div><span className="eyebrow">SOFTWARE</span><h2>Panel version & updates</h2></div>
-        <StatusBadge tone={statusTone}>{active ? data?.status.phase ?? "updating" : data?.status.state ?? "checking"}</StatusBadge>
+        {data && <StatusBadge tone={statusTone}>{active
+          ? data.status.phase || "Updating"
+          : data.status.state === "failed"
+            ? "Failed"
+            : data.status.state === "succeeded"
+              ? "Updated"
+              : data.check.updates_supported ? "Ready" : "Development"}</StatusBadge>}
       </div>
       {update.isLoading ? <TableLoading /> : update.isError ? (
         <div className="panel-update-body"><ErrorPanel error={update.error} retry={() => void update.refetch()} /></div>
@@ -1071,22 +1078,27 @@ function PanelUpdateSettings() {
           <div className="panel-update-version">
             <span className="panel-update-icon"><PackageCheck size={24} /></span>
             <div>
-              <span>Running version</span>
+              <span>Installed version</span>
               <strong>{data.build.version}</strong>
               <small>Revision {data.build.revision === "unknown" ? "not embedded" : data.build.revision.slice(0, 12)} · Built {data.build.built_at === "unknown" ? "from source" : formatDate(data.build.built_at)}</small>
             </div>
           </div>
           <div className="panel-update-controls">
-            <label className="checkbox-row">
-              <input type="checkbox" checked={includePrereleases} disabled={active} onChange={(event) => setIncludePrereleases(event.target.checked)} />
-              <span>Include alpha, beta, and release-candidate updates</span>
-            </label>
-            <button type="button" className="button secondary" disabled={check.isPending || active} onClick={() => check.mutate()}>
+            {data.check.updates_supported && <details className="panel-update-channel">
+              <summary>Update channel</summary>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={includePrereleases} disabled={active || check.isPending} onChange={(event) => setIncludePrereleases(event.target.checked)} />
+                <span><strong>Include prereleases</strong><small>Allow alpha, beta, and release-candidate versions.</small></span>
+              </label>
+            </details>}
+            {data.check.updates_supported && <button type="button" className="button secondary" disabled={check.isPending || active} onClick={() => check.mutate()}>
               <RotateCw size={16} className={check.isPending ? "spin" : undefined} /> {check.isPending ? "Checking…" : "Check for updates"}
-            </button>
+            </button>}
           </div>
           {!data.check.updates_supported ? (
             <div className="notice warning">{data.check.reason}</div>
+          ) : !checked ? (
+            <div className="notice info">Update checks are manual. Check when you want to compare this panel with published GitHub releases.</div>
           ) : latest ? (
             <div className={`panel-release-card ${data.check.update_available ? "available" : ""}`}>
               <div>
@@ -1106,6 +1118,7 @@ function PanelUpdateSettings() {
           ) : (
             <div className="notice info">No complete Dockside release with a signed archive and checksums is published for this channel.</div>
           )}
+          {check.isError && <div className="form-error">Update check failed: {check.error.message}</div>}
           {(active || data.status.state === "failed" || data.status.state === "succeeded") && (
             <div className={`panel-update-progress ${data.status.state}`}>
               <div><strong>{data.status.message || "Update status"}</strong><StatusBadge tone={statusTone}>{data.status.phase || data.status.state}</StatusBadge></div>

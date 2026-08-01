@@ -5,6 +5,7 @@ Dockside uses Semantic Versioning in the form `MAJOR.MINOR.PATCH`.
 Examples:
 
 - `0.1.0-alpha.2` — the first public alpha release.
+- `0.1.0-alpha.3` — the next compatible alpha iteration.
 - `0.2.0` — an early-development feature release that may contain documented
   breaking changes.
 - `0.2.1` — a compatible bug or security fix for `0.2.x`.

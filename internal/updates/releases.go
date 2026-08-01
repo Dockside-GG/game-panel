@@ -88,7 +88,7 @@ func NewCheckerForTest(url string, client *http.Client) *Checker {
 	return &Checker{httpClient: client, url: url, now: func() time.Time { return time.Now().UTC() }}
 }
 
-func (c *Checker) Check(ctx context.Context, current string, includePrereleases, force bool) (Check, error) {
+func (c *Checker) Current(current string, includePrereleases bool) Check {
 	result := Check{
 		Repository:       repositoryURL,
 		CurrentVersion:   strings.TrimSpace(current),
@@ -98,6 +98,14 @@ func (c *Checker) Check(ctx context.Context, current string, includePrereleases,
 	if _, ok := parseVersion(result.CurrentVersion); !ok {
 		result.UpdatesSupported = false
 		result.Reason = "In-panel updates are available only for versioned release builds. Development builds must be updated from the source checkout."
+	}
+	return result
+}
+
+func (c *Checker) Check(ctx context.Context, current string, includePrereleases, force bool) (Check, error) {
+	result := c.Current(current, includePrereleases)
+	if !result.UpdatesSupported {
+		return result, nil
 	}
 	releases, checkedAt, err := c.releases(ctx, force)
 	if err != nil {
