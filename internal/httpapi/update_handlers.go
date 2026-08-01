@@ -33,8 +33,8 @@ func (s *Server) panelUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, panelUpdateResponse{
-		Build: build,
-		Check: s.updates.Current(build.Version, queryBoolean(r, "include_prereleases")),
+		Build:  build,
+		Check:  s.updates.Current(build.Version, queryBoolean(r, "include_prereleases")),
 		Status: status,
 	})
 }
