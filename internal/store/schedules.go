@@ -57,12 +57,24 @@ type CreateScheduleParams struct {
 	Tasks          []ScheduleTaskInput
 }
 
+type UpdateScheduleParams struct {
+	ScheduleID     string
+	ServerID       string
+	Name           string
+	CronExpression string
+	Timezone       string
+	Enabled        bool
+	Tasks          []ScheduleTaskInput
+}
+
 type ScheduleRunJob struct {
 	RunID      string
 	ScheduleID string
 	ServerID   string
 	ActorID    string
 	Name       string
+	Timezone   string
+	PlannedFor time.Time
 	Tasks      []ScheduleTask
 }
 
@@ -78,8 +90,19 @@ func ValidateSchedule(expression, timezone string) (time.Time, error) {
 	return parsed.Next(time.Now().In(location)).UTC(), nil
 }
 
+func scheduleNextRun(expression, timezone string, enabled bool) (*time.Time, error) {
+	next, err := ValidateSchedule(expression, timezone)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return nil, nil
+	}
+	return &next, nil
+}
+
 func (s *Store) CreateSchedule(ctx context.Context, input CreateScheduleParams) (Schedule, error) {
-	nextRun, err := ValidateSchedule(input.CronExpression, input.Timezone)
+	nextRun, err := scheduleNextRun(input.CronExpression, input.Timezone, input.Enabled)
 	if err != nil {
 		return Schedule{}, err
 	}
@@ -133,6 +156,67 @@ func (s *Store) CreateSchedule(ctx context.Context, input CreateScheduleParams) 
 			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id, position, task_type, config, timeout_seconds
 		`, taskID, scheduleID, position, task.TaskType, string(task.Config), task.TimeoutSeconds).Scan(
+			&stored.ID, &stored.Position, &stored.TaskType, &stored.Config, &stored.TimeoutSeconds,
+		)
+		if err != nil {
+			return Schedule{}, err
+		}
+		item.Tasks = append(item.Tasks, stored)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Schedule{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) UpdateSchedule(ctx context.Context, input UpdateScheduleParams) (Schedule, error) {
+	nextRun, err := scheduleNextRun(input.CronExpression, input.Timezone, input.Enabled)
+	if err != nil {
+		return Schedule{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Schedule{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var item Schedule
+	err = tx.QueryRow(ctx, `
+		UPDATE schedules
+		SET name = $3, cron_expression = $4, timezone = $5, enabled = $6,
+		    next_run_at = $7, updated_at = now()
+		WHERE id = $1 AND server_id = $2
+		RETURNING id, server_id, name, cron_expression, timezone, enabled,
+		          concurrency_policy, misfire_policy, next_run_at, created_by,
+		          created_at, updated_at
+	`, input.ScheduleID, input.ServerID, input.Name, input.CronExpression,
+		input.Timezone, input.Enabled, nextRun,
+	).Scan(
+		&item.ID, &item.ServerID, &item.Name, &item.CronExpression, &item.Timezone,
+		&item.Enabled, &item.ConcurrencyPolicy, &item.MisfirePolicy, &item.NextRunAt,
+		&item.CreatedBy, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Schedule{}, ErrNotFound
+	}
+	if err != nil {
+		return Schedule{}, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM schedule_tasks WHERE schedule_id = $1`, input.ScheduleID); err != nil {
+		return Schedule{}, err
+	}
+	item.Tasks = make([]ScheduleTask, 0, len(input.Tasks))
+	for position, task := range input.Tasks {
+		taskID, err := identity.NewUUID()
+		if err != nil {
+			return Schedule{}, err
+		}
+		var stored ScheduleTask
+		err = tx.QueryRow(ctx, `
+			INSERT INTO schedule_tasks(id, schedule_id, position, task_type, config, timeout_seconds)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			RETURNING id, position, task_type, config, timeout_seconds
+		`, taskID, input.ScheduleID, position, task.TaskType, string(task.Config), task.TimeoutSeconds).Scan(
 			&stored.ID, &stored.Position, &stored.TaskType, &stored.Config, &stored.TimeoutSeconds,
 		)
 		if err != nil {
@@ -222,7 +306,7 @@ func (s *Store) SetScheduleEnabled(ctx context.Context, serverID, scheduleID str
 	if err != nil {
 		return err
 	}
-	next, err := ValidateSchedule(expression, timezone)
+	next, err := scheduleNextRun(expression, timezone, enabled)
 	if err != nil {
 		return err
 	}
@@ -367,8 +451,12 @@ func (s *Store) ScheduleRunJob(ctx context.Context, runID string) (ScheduleRunJo
 		FROM schedules AS schedule
 		WHERE run.id = $1 AND run.schedule_id = schedule.id
 		  AND run.status IN ('queued', 'running')
-		RETURNING run.id, schedule.id, schedule.server_id, schedule.created_by, schedule.name
-	`, runID).Scan(&job.RunID, &job.ScheduleID, &job.ServerID, &job.ActorID, &job.Name)
+		RETURNING run.id, schedule.id, schedule.server_id, schedule.created_by, schedule.name,
+		          schedule.timezone, run.planned_for
+	`, runID).Scan(
+		&job.RunID, &job.ScheduleID, &job.ServerID, &job.ActorID, &job.Name,
+		&job.Timezone, &job.PlannedFor,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ScheduleRunJob{}, ErrNotFound
 	}

@@ -53,30 +53,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input.Name = strings.TrimSpace(input.Name)
-	input.CronExpression = strings.TrimSpace(input.CronExpression)
-	input.Timezone = strings.TrimSpace(input.Timezone)
-	if input.Name == "" || len(input.Name) > 120 || len(input.Tasks) == 0 || len(input.Tasks) > 20 {
-		writeProblem(w, r, errors.Join(errBadRequest, errors.New("invalid schedule name or task count")))
-		return
-	}
-	if _, err := store.ValidateSchedule(input.CronExpression, input.Timezone); err != nil {
+	tasks, err := normalizeScheduleRequest(&input)
+	if err != nil {
 		writeProblem(w, r, errors.Join(errBadRequest, err))
 		return
-	}
-	tasks := make([]store.ScheduleTaskInput, 0, len(input.Tasks))
-	for _, task := range input.Tasks {
-		task.TaskType = strings.ToLower(strings.TrimSpace(task.TaskType))
-		if err := validateScheduleTask(task); err != nil {
-			writeProblem(w, r, errors.Join(errBadRequest, err))
-			return
-		}
-		if task.TimeoutSeconds == 0 {
-			task.TimeoutSeconds = 300
-		}
-		tasks = append(tasks, store.ScheduleTaskInput{
-			TaskType: task.TaskType, Config: task.Config, TimeoutSeconds: task.TimeoutSeconds,
-		})
 	}
 	result, err := s.store.CreateSchedule(r.Context(), store.CreateScheduleParams{
 		ServerID: serverID, Name: input.Name, CronExpression: input.CronExpression,
@@ -87,6 +67,60 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
+	session, _ := sessionFromContext(r.Context())
+	if !canOperate(session.User.PanelRole) {
+		writeProblem(w, r, errForbidden)
+		return
+	}
+	var input createScheduleRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	tasks, err := normalizeScheduleRequest(&input)
+	if err != nil {
+		writeProblem(w, r, errors.Join(errBadRequest, err))
+		return
+	}
+	result, err := s.store.UpdateSchedule(r.Context(), store.UpdateScheduleParams{
+		ScheduleID: chi.URLParam(r, "scheduleID"), ServerID: chi.URLParam(r, "serverID"),
+		Name: input.Name, CronExpression: input.CronExpression, Timezone: input.Timezone,
+		Enabled: input.Enabled, Tasks: tasks,
+	})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func normalizeScheduleRequest(input *createScheduleRequest) ([]store.ScheduleTaskInput, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	input.CronExpression = strings.TrimSpace(input.CronExpression)
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	if input.Name == "" || len(input.Name) > 120 || len(input.Tasks) == 0 || len(input.Tasks) > 20 {
+		return nil, errors.New("invalid schedule name or task count")
+	}
+	if _, err := store.ValidateSchedule(input.CronExpression, input.Timezone); err != nil {
+		return nil, err
+	}
+	tasks := make([]store.ScheduleTaskInput, 0, len(input.Tasks))
+	for _, rawTask := range input.Tasks {
+		task := rawTask
+		task.TaskType = strings.ToLower(strings.TrimSpace(task.TaskType))
+		if err := validateScheduleTask(task); err != nil {
+			return nil, err
+		}
+		if task.TimeoutSeconds == 0 {
+			task.TimeoutSeconds = 300
+		}
+		tasks = append(tasks, store.ScheduleTaskInput{
+			TaskType: task.TaskType, Config: task.Config, TimeoutSeconds: task.TimeoutSeconds,
+		})
+	}
+	return tasks, nil
 }
 
 func (s *Server) setScheduleEnabled(w http.ResponseWriter, r *http.Request) {

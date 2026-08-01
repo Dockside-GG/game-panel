@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -22,6 +23,27 @@ func TestCompareVersions(t *testing.T) {
 		if got := compareVersions(test.left, test.right); got != test.want {
 			t.Fatalf("compareVersions(%q, %q) = %d, want %d", test.left, test.right, got, test.want)
 		}
+	}
+}
+
+func TestDevelopmentBuildDoesNotContactGitHub(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	checker := NewCheckerForTest(server.URL, server.Client())
+	check, err := checker.Check(context.Background(), "dev", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.UpdatesSupported {
+		t.Fatal("development build unexpectedly supports in-panel updates")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("development check made %d remote requests", requests.Load())
 	}
 }
 

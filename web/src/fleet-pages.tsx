@@ -3063,7 +3063,7 @@ function ServerActivity({ server }: { server: ServerSummary }) {
 }
 
 type DraftScheduleTask = {
-  key: number;
+  key: string;
   task_type: "backup" | "power" | "command" | "delay" | "notify";
   value: string;
   includes: string;
@@ -3079,40 +3079,55 @@ const cronPresets = [
   { label: "Weekly Sunday 4:00 AM", value: "0 4 * * 0" },
 ];
 
+function newScheduleTask(
+  taskType: DraftScheduleTask["task_type"],
+  key = `task-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+): DraftScheduleTask {
+  return {
+    key,
+    task_type: taskType,
+    value: taskType === "backup" ? "Scheduled backup" : taskType === "power" ? "restart" : "",
+    includes: "",
+    excludes: taskType === "backup" ? "logs/*\n*.log" : "",
+    retention: "",
+  };
+}
+
+function storedScheduleTask(task: ServerSchedule["tasks"][number], index: number): DraftScheduleTask {
+  const config = task.config || {};
+  const stringValue = (name: string) => typeof config[name] === "string" ? String(config[name]) : "";
+  const rules = (name: string) => Array.isArray(config[name])
+    ? (config[name] as unknown[]).filter((value): value is string => typeof value === "string").join("\n")
+    : "";
+  const retention = typeof config.retention_days === "number" ? String(config.retention_days) : "";
+  const value = task.task_type === "backup"
+    ? stringValue("name")
+    : task.task_type === "power"
+      ? stringValue("action")
+      : task.task_type === "command"
+        ? stringValue("command")
+        : task.task_type === "delay"
+          ? typeof config.seconds === "number" ? String(config.seconds) : ""
+          : stringValue("message");
+  return {
+    key: task.id || `stored-task-${index}`,
+    task_type: task.task_type,
+    value,
+    includes: rules("include_paths"),
+    excludes: rules("exclude_globs"),
+    retention,
+  };
+}
+
 function ServerSchedules({ server }: { server: ServerSummary }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState("Automated maintenance");
-  const [cronExpression, setCronExpression] = useState("0 4 * * *");
-  const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
-  const [enabled, setEnabled] = useState(true);
-  const [tasks, setTasks] = useState<DraftScheduleTask[]>([
-    { key: 1, task_type: "backup", value: "Scheduled backup", includes: "", excludes: "logs/*\n*.log", retention: "" },
-    { key: 2, task_type: "power", value: "restart", includes: "", excludes: "", retention: "" },
-  ]);
+  const [editing, setEditing] = useState<ServerSchedule | "new" | null>(null);
   const schedules = useQuery({
     queryKey: ["server-schedules", server.id],
     queryFn: () => api<{ schedules: ServerSchedule[] }>(`/api/v1/servers/${server.id}/schedules`),
     refetchInterval: 10_000,
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["server-schedules", server.id] });
-  const create = useMutation({
-    mutationFn: () =>
-      api<ServerSchedule>(`/api/v1/servers/${server.id}/schedules`, {
-        method: "POST",
-        body: JSON.stringify({
-          name: name.trim(),
-          cron_expression: cronExpression.trim(),
-          timezone: timezone.trim(),
-          enabled,
-          tasks: tasks.map((task) => ({
-            task_type: task.task_type,
-            timeout_seconds: task.task_type === "delay" ? Math.max(Number(task.value) + 30, 60) : 300,
-            config: scheduleTaskConfig(task),
-          })),
-        }),
-      }),
-    onSuccess: () => void refresh(),
-  });
   const toggle = useMutation({
     mutationFn: ({ schedule, enabled }: { schedule: ServerSchedule; enabled: boolean }) =>
       api<void>(`/api/v1/servers/${server.id}/schedules/${schedule.id}`, {
@@ -3131,73 +3146,21 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
       api<void>(`/api/v1/servers/${server.id}/schedules/${schedule.id}`, { method: "DELETE" }),
     onSuccess: () => void refresh(),
   });
-  const actionError = create.error || toggle.error || run.error || remove.error;
-
-  function updateTask(key: number, patch: Partial<DraftScheduleTask>) {
-    setTasks((current) => current.map((task) => task.key === key ? { ...task, ...patch } : task));
-  }
+  const actionError = toggle.error || run.error || remove.error;
 
   return (
     <div className="schedule-layout">
-      <section className="panel schedule-builder">
-        <div className="panel-heading"><div><span className="eyebrow">CRON BUILDER</span><h2>New schedule</h2></div></div>
-        <div className="schedule-form">
-          <label>Name<input value={name} maxLength={120} onChange={(event) => setName(event.target.value)} /></label>
-          <div className="form-grid two">
-            <label>Preset<select value={cronPresets.some((preset) => preset.value === cronExpression) ? cronExpression : "custom"} onChange={(event) => event.target.value !== "custom" && setCronExpression(event.target.value)}>{cronPresets.map((preset) => <option value={preset.value} key={preset.value}>{preset.label}</option>)}<option value="custom">Custom expression</option></select></label>
-            <label>Timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
+      <section className="panel schedule-panel">
+        <div className="panel-heading">
+          <div><span className="eyebrow">AUTOMATION</span><h2>Schedules</h2></div>
+          <div className="schedule-heading-actions">
+            <button className="button secondary compact" aria-label="Refresh schedules" onClick={() => void schedules.refetch()}><RefreshCw size={15} /> Refresh</button>
+            <button className="button primary compact" onClick={() => setEditing("new")}><Plus size={16} /> New schedule</button>
           </div>
-          <label>Cron expression<input className="mono" value={cronExpression} onChange={(event) => setCronExpression(event.target.value)} placeholder="0 4 * * *" /></label>
-          <div className="schedule-task-heading"><strong>Ordered tasks</strong><button className="secondary-button compact" onClick={() => setTasks((current) => [...current, { key: Date.now(), task_type: "command", value: "", includes: "", excludes: "", retention: "" }])}><Plus size={13} /> Add task</button></div>
-          <div className="schedule-task-list">
-            {tasks.map((task, index) => (
-              <div className="schedule-task" key={task.key}>
-                <span>{index + 1}</span>
-                <select value={task.task_type} onChange={(event) => updateTask(task.key, { task_type: event.target.value as DraftScheduleTask["task_type"], value: event.target.value === "power" ? "restart" : "" })}>
-                  <option value="backup">Backup</option><option value="power">Power</option><option value="command">Console command</option><option value="delay">Delay</option><option value="notify">Notification</option>
-                </select>
-                {task.task_type === "power" ? (
-                  <select value={task.value} onChange={(event) => updateTask(task.key, { value: event.target.value })}><option value="restart">Restart</option><option value="start">Start</option><option value="stop">Stop</option><option value="kill">Kill</option></select>
-                ) : (
-                  <input value={task.value} onChange={(event) => updateTask(task.key, { value: event.target.value })} type={task.task_type === "delay" ? "number" : "text"} min={task.task_type === "delay" ? 1 : undefined} max={task.task_type === "delay" ? 3600 : undefined} placeholder={task.task_type === "backup" ? "Backup name" : task.task_type === "command" ? "say Restarting soon" : task.task_type === "delay" ? "Seconds" : "Activity notification"} />
-                )}
-                <button className="icon-button danger" disabled={tasks.length === 1} onClick={() => setTasks((current) => current.filter((item) => item.key !== task.key))}><Trash2 size={13} /></button>
-                {task.task_type === "backup" && (
-                  <div className="schedule-backup-rules">
-                    <BackupPathPicker
-                      serverID={server.id}
-                      includes={task.includes}
-                      excludes={task.excludes}
-                      onChange={(includes, excludes) => updateTask(task.key, { includes, excludes })}
-                    />
-                    <label>
-                      Retention days <FieldHelp text="Automatically remove this scheduled backup after the selected number of days. Leave blank to keep it indefinitely." />
-                      <input type="number" min={1} max={3650} value={task.retention} onChange={(event) => updateTask(task.key, { retention: event.target.value })} placeholder="Keep indefinitely" />
-                    </label>
-                    <details className="advanced-filters">
-                      <summary>Advanced path rules</summary>
-                      <p>Use these only when a glob rule cannot be expressed with the file picker.</p>
-                      <div className="form-grid two">
-                        <label>Include paths<textarea value={task.includes} onChange={(event) => updateTask(task.key, { includes: event.target.value })} placeholder="Blank includes every checked path" /></label>
-                        <label>Exclude globs<textarea value={task.excludes} onChange={(event) => updateTask(task.key, { excludes: event.target.value })} placeholder="logs/*" /></label>
-                      </div>
-                    </details>
-                    <small>Subscribed Discord webhook destinations receive the completed ZIP automatically.</small>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          <label className="checkbox-row"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>Enable immediately</strong><small>The worker will calculate the first run in {timezone}.</small></span></label>
-          <button className="primary-button schedule-create-button" disabled={create.isPending || !name.trim() || !cronExpression.trim() || tasks.some((task) => !task.value.trim())} onClick={() => create.mutate()}><Clock3 size={15} /> {create.isPending ? "Creating..." : "Create schedule"}</button>
-          {create.isError && <div className="form-error">{create.error.message}</div>}
         </div>
-      </section>
-      <section className="panel">
-        <div className="panel-heading"><div><span className="eyebrow">AUTOMATION</span><h2>Schedules</h2></div><button className="icon-button" onClick={() => void schedules.refetch()}><RefreshCw size={14} /></button></div>
         {schedules.isLoading && <div className="file-state"><span className="loader" /></div>}
         {schedules.isError && <ErrorPanel error={schedules.error} retry={() => void schedules.refetch()} />}
-        {schedules.data?.schedules.length === 0 && <EmptyState icon={Clock3} title="No schedules" description="Build ordered cron automations for this server." />}
+        {schedules.data?.schedules.length === 0 && <EmptyState icon={Clock3} title="No schedules" description="Create ordered cron automations for backups, commands, power actions, delays, and notifications." action={<button className="button secondary" onClick={() => setEditing("new")}><Plus size={16} /> New schedule</button>} />}
         <div className="schedule-list">
           {schedules.data?.schedules.map((schedule) => (
             <article key={schedule.id}>
@@ -3209,6 +3172,7 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
               </div>
               <div className="schedule-actions">
                 <button className="secondary-button compact" disabled={run.isPending} onClick={() => run.mutate(schedule)}><Play size={12} /> Run now</button>
+                <button className="secondary-button compact" onClick={() => setEditing(schedule)}><Pencil size={12} /> Edit</button>
                 <button className="icon-button" onClick={() => toggle.mutate({ schedule, enabled: !schedule.enabled })} title={schedule.enabled ? "Disable" : "Enable"}>{schedule.enabled ? <CircleStop size={13} /> : <Play size={13} />}</button>
                 <button className="icon-button danger" onClick={() => window.confirm(`Delete schedule “${schedule.name}”?`) && remove.mutate(schedule)}><Trash2 size={13} /></button>
               </div>
@@ -3217,6 +3181,118 @@ function ServerSchedules({ server }: { server: ServerSummary }) {
         </div>
         {actionError && <div className="form-error">{actionError.message}</div>}
       </section>
+      {editing && (
+        <ScheduleEditorDialog
+          server={server}
+          schedule={editing === "new" ? undefined : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => void refresh()}
+        />
+      )}
+    </div>
+  );
+}
+
+function ScheduleEditorDialog({ server, schedule, onClose, onSaved }: {
+  server: ServerSummary;
+  schedule?: ServerSchedule;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(schedule?.name || "Automated maintenance");
+  const [cronExpression, setCronExpression] = useState(schedule?.cron_expression || "0 4 * * *");
+  const [timezone, setTimezone] = useState(schedule?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
+  const [tasks, setTasks] = useState<DraftScheduleTask[]>(schedule
+    ? schedule.tasks.map(storedScheduleTask)
+    : [newScheduleTask("backup", "initial-backup"), newScheduleTask("power", "initial-power")]);
+  const save = useMutation({
+    mutationFn: () => api<ServerSchedule>(
+      schedule
+        ? `/api/v1/servers/${server.id}/schedules/${schedule.id}`
+        : `/api/v1/servers/${server.id}/schedules`,
+      {
+        method: schedule ? "PUT" : "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          cron_expression: cronExpression.trim(),
+          timezone: timezone.trim(),
+          enabled,
+          tasks: tasks.map((task) => ({
+            task_type: task.task_type,
+            timeout_seconds: task.task_type === "delay" ? Math.max(Number(task.value) + 30, 60) : 300,
+            config: scheduleTaskConfig(task),
+          })),
+        }),
+      },
+    ),
+    onSuccess: () => {
+      onSaved();
+      onClose();
+    },
+  });
+
+  function updateTask(key: string, patch: Partial<DraftScheduleTask>) {
+    setTasks((current) => current.map((task) => task.key === key ? { ...task, ...patch } : task));
+  }
+
+  const validRetention = tasks.every((task) => task.task_type !== "backup" || task.retention === "" || (Number(task.retention) >= 1 && Number(task.retention) <= 3650));
+  const canSave = Boolean(name.trim() && cronExpression.trim() && timezone.trim() && tasks.length && tasks.every((task) => task.value.trim()) && validRetention);
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => !save.isPending && onClose()}>
+      <div className="dialog schedule-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="schedule-editor-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="icon-button dialog-close" aria-label="Close schedule editor" disabled={save.isPending} onClick={onClose}><X size={17} /></button>
+        <div className="dialog-title-row"><div><span className="eyebrow">CRON BUILDER</span><h2 id="schedule-editor-title">{schedule ? "Edit schedule" : "New schedule"}</h2></div></div>
+        <p>{schedule ? "Update this automation and its ordered tasks." : "Build an ordered automation for this game server."}</p>
+        <div className="schedule-form">
+          <label>Name <FieldHelp text="A recognizable name for this automation." /><input value={name} maxLength={120} onChange={(event) => setName(event.target.value)} /></label>
+          <div className="form-grid two">
+            <label>Preset <FieldHelp text="Choose a common schedule or select Custom expression to enter your own five-field cron expression." /><select value={cronPresets.some((preset) => preset.value === cronExpression) ? cronExpression : "custom"} onChange={(event) => event.target.value !== "custom" && setCronExpression(event.target.value)}>{cronPresets.map((preset) => <option value={preset.value} key={preset.value}>{preset.label}</option>)}<option value="custom">Custom expression</option></select></label>
+            <label>Timezone <FieldHelp text="An IANA timezone such as America/Chicago or UTC. Cron times are evaluated in this timezone." /><input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
+          </div>
+          <label>Cron expression <FieldHelp text="Five fields: minute, hour, day of month, month, and day of week." /><input className="mono" value={cronExpression} onChange={(event) => setCronExpression(event.target.value)} placeholder="0 4 * * *" /></label>
+          <div className="schedule-task-heading"><strong>Ordered tasks</strong><button className="button secondary compact" onClick={() => setTasks((current) => [...current, newScheduleTask("command")])}><Plus size={14} /> Add task</button></div>
+          <div className="schedule-task-list">
+            {tasks.map((task, index) => (
+              <div className="schedule-task" key={task.key}>
+                <span>{index + 1}</span>
+                <select aria-label={`Task ${index + 1} type`} value={task.task_type} onChange={(event) => {
+                  const next = newScheduleTask(event.target.value as DraftScheduleTask["task_type"], task.key);
+                  setTasks((current) => current.map((candidate) => candidate.key === task.key ? next : candidate));
+                }}>
+                  <option value="backup">Backup</option><option value="power">Power</option><option value="command">Console command</option><option value="delay">Delay</option><option value="notify">Notification</option>
+                </select>
+                {task.task_type === "power" ? (
+                  <select aria-label={`Task ${index + 1} power action`} value={task.value} onChange={(event) => updateTask(task.key, { value: event.target.value })}><option value="restart">Restart</option><option value="start">Start</option><option value="stop">Stop</option><option value="kill">Kill</option></select>
+                ) : (
+                  <input aria-label={`Task ${index + 1} value`} value={task.value} onChange={(event) => updateTask(task.key, { value: event.target.value })} type={task.task_type === "delay" ? "number" : "text"} min={task.task_type === "delay" ? 1 : undefined} max={task.task_type === "delay" ? 3600 : undefined} placeholder={task.task_type === "backup" ? "Backup name prefix" : task.task_type === "command" ? "say Restarting soon" : task.task_type === "delay" ? "Seconds" : "Activity notification"} />
+                )}
+                <button className="icon-button danger" aria-label={`Remove task ${index + 1}`} disabled={tasks.length === 1} onClick={() => setTasks((current) => current.filter((item) => item.key !== task.key))}><Trash2 size={14} /></button>
+                {task.task_type === "backup" && (
+                  <div className="schedule-backup-rules">
+                    <div className="notice info">Each run appends its scheduled date and time to this backup-name prefix and creates a separate archive.</div>
+                    <BackupPathPicker serverID={server.id} includes={task.includes} excludes={task.excludes} onChange={(includes, excludes) => updateTask(task.key, { includes, excludes })} />
+                    <label>Retention days <FieldHelp text="Automatically delete each generated archive after this many days. Leave blank to keep it indefinitely." /><input type="number" min={1} max={3650} value={task.retention} onChange={(event) => updateTask(task.key, { retention: event.target.value })} placeholder="Keep indefinitely" /></label>
+                    <details className="advanced-filters">
+                      <summary>Advanced path rules</summary>
+                      <p>Use these only when a glob rule cannot be expressed with the file picker.</p>
+                      <div className="form-grid two">
+                        <label>Include paths<textarea value={task.includes} onChange={(event) => updateTask(task.key, { includes: event.target.value })} placeholder="Blank includes every checked path" /></label>
+                        <label>Exclude globs<textarea value={task.excludes} onChange={(event) => updateTask(task.key, { excludes: event.target.value })} placeholder="logs/*" /></label>
+                      </div>
+                    </details>
+                    <small>Expired unlocked archives are removed automatically. Subscribed Discord webhook destinations receive each completed ZIP.</small>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <label className="checkbox-row"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>{schedule ? "Schedule enabled" : "Enable immediately"}</strong><small>{enabled ? `The worker calculates the next run in ${timezone}.` : "The schedule is saved without a next run until enabled."}</small></span></label>
+          {!validRetention && <div className="form-error">Retention must be between 1 and 3650 days or left blank.</div>}
+          {save.isError && <div className="form-error">{save.error.message}</div>}
+          <div className="dialog-actions"><button className="button ghost" disabled={save.isPending} onClick={onClose}>Cancel</button><button className="button primary" disabled={save.isPending || !canSave} onClick={() => save.mutate()}><Save size={15} /> {save.isPending ? "Saving…" : schedule ? "Save changes" : "Create schedule"}</button></div>
+        </div>
+      </div>
     </div>
   );
 }
