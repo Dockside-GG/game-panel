@@ -1,8 +1,8 @@
 # Releasing Dockside
 
 Dockside uses Semantic Versioning and publishes prerelease builds while the
-project remains experimental. The first public release is
-`v0.1.0-alpha.2`; its container and bundle version is `0.1.0-alpha.2` without
+project remains experimental. The current release candidate is
+`v0.1.0-alpha.3`; its container and bundle version is `0.1.0-alpha.3` without
 the Git tag's `v` prefix.
 
 > [!CAUTION]
@@ -56,7 +56,7 @@ bash scripts/tests/install-smoke.sh
 Build every production target using the candidate metadata:
 
 ```powershell
-$Version = "0.1.0-alpha.2"
+$Version = "0.1.0-alpha.3"
 $Revision = (git rev-parse HEAD).Trim()
 $BuiltAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $Arguments = @(
@@ -100,14 +100,14 @@ The candidate is blocked until all of the following pass:
 PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-release.ps1 -Version 0.1.0-alpha.2
+powershell -ExecutionPolicy Bypass -File .\scripts\package-release.ps1 -Version 0.1.0-alpha.3
 ```
 
 Linux:
 
 ```bash
 chmod +x scripts/package-release.sh
-./scripts/package-release.sh 0.1.0-alpha.2
+./scripts/package-release.sh 0.1.0-alpha.3
 ```
 
 The packaging scripts create versioned ZIP and TAR archives plus
@@ -145,7 +145,7 @@ intentionally invisible to the in-panel updater.
 
 1. Merge the reviewed release candidate to `main`.
 2. Create and push the annotated tag, for example
-   `git tag -a v0.1.0-alpha.2 -m "Dockside v0.1.0-alpha.2"`.
+   `git tag -a v0.1.0-alpha.3 -m "Dockside v0.1.0-alpha.3"`.
 3. Allow GitHub to build the images and draft release from that tag.
 4. Compare asset checksums, inspect the SBOM, and verify provenance.
 5. Install from the attached archive and confirm the Diagnostics page reports

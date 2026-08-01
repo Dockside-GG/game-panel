@@ -680,8 +680,9 @@ func (w *Worker) executeScheduleTask(
 		if err := json.Unmarshal(task.Config, &config); err != nil {
 			return err
 		}
+		name := scheduledBackupName(config.Name, job.PlannedFor, job.Timezone)
 		_, err := w.store.CreateBackup(
-			ctx, job.ServerID, job.ActorID, config.Name, config.IncludePaths,
+			ctx, job.ServerID, job.ActorID, name, config.IncludePaths,
 			config.ExcludeGlobs, config.RetentionDays,
 		)
 		return err
@@ -733,6 +734,24 @@ func (w *Worker) executeScheduleTask(
 	default:
 		return fmt.Errorf("unsupported schedule task %q", task.TaskType)
 	}
+}
+
+func scheduledBackupName(prefix string, plannedFor time.Time, timezone string) string {
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		location = time.UTC
+	}
+	stamp := plannedFor.In(location).Format("2006-01-02_15-04-05_MST")
+	suffix := " - " + stamp
+	prefixRunes := []rune(strings.TrimSpace(prefix))
+	maximumPrefix := 120 - len([]rune(suffix))
+	if maximumPrefix < 1 {
+		return stamp
+	}
+	if len(prefixRunes) > maximumPrefix {
+		prefixRunes = prefixRunes[:maximumPrefix]
+	}
+	return string(prefixRunes) + suffix
 }
 
 func (w *Worker) cleanup(ctx context.Context) error {
