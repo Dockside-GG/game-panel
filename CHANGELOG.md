@@ -40,6 +40,23 @@ documented.
 
 ## [0.1.0-alpha.2] - 2026-07-31
 
+### Fixed
+
+- Release packaging now creates its artifact output directory before generating
+  the SPDX source SBOM.
+- Release archive and container-image jobs now declare the GitHub permissions
+  required to publish artifact metadata and build attestations.
+
+### Changed
+
+- Release references, package metadata, and installation examples were advanced
+  to `0.1.0-alpha.2` instead of moving or reusing the immutable `alpha.1` tag.
+- `alpha.2` supersedes `alpha.1` as the first supported downloadable public
+  alpha because the original release workflow did not finish publishing all
+  required assets.
+
+## [0.1.0-alpha.1] - 2026-07-31
+
 ### Added
 
 - Discord-first authentication, single-use invitations, MFA policy, and
@@ -70,3 +87,4 @@ documented.
 [Unreleased]: https://github.com/Dockside-GG/game-panel/compare/v0.1.0-alpha.3...HEAD
 [0.1.0-alpha.3]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/Dockside-GG/game-panel/releases/tag/v0.1.0-alpha.1
